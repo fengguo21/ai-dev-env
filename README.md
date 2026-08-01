@@ -1,3 +1,6 @@
+renyakundvd
+
+
 # AI Dev Environment for macOS v1.1
 
 A professional Ghostty + tmux + Git worktree environment for Codex, Claude
@@ -87,6 +90,9 @@ git diff
 gh pr create
 gh pr checks --watch
 ```
+
+
+
 
 Create a parallel Git worktree from the current commit or another base ref:
 
