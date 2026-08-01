@@ -1,0 +1,117 @@
+#!/usr/bin/env bash
+set -u
+
+PASS_COUNT=0
+FAIL_COUNT=0
+
+pass() {
+  PASS_COUNT=$((PASS_COUNT + 1))
+  printf 'PASS  %s\n' "$*"
+}
+
+fail() {
+  FAIL_COUNT=$((FAIL_COUNT + 1))
+  printf 'FAIL  %s\n' "$*"
+}
+
+info() {
+  printf 'INFO  %s\n' "$*"
+}
+
+find_ghostty() {
+  if command -v ghostty >/dev/null 2>&1; then
+    command -v ghostty
+  elif [ -x /Applications/Ghostty.app/Contents/MacOS/ghostty ]; then
+    printf '%s\n' /Applications/Ghostty.app/Contents/MacOS/ghostty
+  elif [ -x "${HOME}/Applications/Ghostty.app/Contents/MacOS/ghostty" ]; then
+    printf '%s\n' "${HOME}/Applications/Ghostty.app/Contents/MacOS/ghostty"
+  else
+    return 1
+  fi
+}
+
+validate_tmux_config() {
+  local socket_name="ai-dev-doctor-$$"
+  local verify_config
+  verify_config="$(mktemp "${TMPDIR:-/tmp}/ai-dev-doctor-tmux.XXXXXX")" || return 1
+  sed '/^[[:space:]]*run-shell.*tpm\/tpm/d' "${HOME}/.tmux.conf" > "$verify_config"
+
+  if ! tmux -L "$socket_name" -f "$verify_config" new-session -d -s validate; then
+    rm -f "$verify_config"
+    return 1
+  fi
+
+  tmux -L "$socket_name" kill-server >/dev/null 2>&1 || true
+  rm -f "$verify_config"
+}
+
+printf 'AI Dev Environment v1.1 doctor\n\n'
+
+if GHOSTTY_BIN="$(find_ghostty)"; then
+  pass "$($GHOSTTY_BIN +version | head -1)"
+else
+  fail 'Ghostty is not installed'
+  GHOSTTY_BIN=""
+fi
+
+if command -v tmux >/dev/null 2>&1; then
+  pass "$(tmux -V)"
+else
+  fail 'tmux is not installed'
+fi
+
+if command -v git >/dev/null 2>&1; then
+  pass "$(git --version)"
+else
+  fail 'git is not installed'
+fi
+
+if [ -n "$GHOSTTY_BIN" ] && [ -f "${HOME}/.config/ghostty/config" ] && \
+   "$GHOSTTY_BIN" +validate-config --config-file="${HOME}/.config/ghostty/config"; then
+  pass 'Ghostty configuration is valid'
+else
+  fail 'Ghostty configuration is missing or invalid'
+fi
+
+if [ -n "$GHOSTTY_BIN" ] && "$GHOSTTY_BIN" +list-fonts | \
+   grep -Fq 'JetBrainsMono Nerd Font Mono'; then
+  pass 'JetBrainsMono Nerd Font Mono is available'
+else
+  fail 'JetBrainsMono Nerd Font Mono is unavailable'
+fi
+
+if [ -n "$GHOSTTY_BIN" ] && "$GHOSTTY_BIN" +list-themes | \
+   grep -Fq 'TokyoNight Night'; then
+  pass 'TokyoNight Night theme is available'
+else
+  fail 'TokyoNight Night theme is unavailable'
+fi
+
+if command -v tmux >/dev/null 2>&1 && [ -f "${HOME}/.tmux.conf" ] && validate_tmux_config; then
+  pass 'tmux configuration is valid'
+else
+  fail 'tmux configuration is missing or invalid'
+fi
+
+for plugin_name in tpm tmux-resurrect tmux-continuum tmux-yank; do
+  if [ -d "${HOME}/.tmux/plugins/${plugin_name}" ]; then
+    pass "tmux plugin installed: ${plugin_name}"
+  else
+    fail "tmux plugin missing: ${plugin_name}"
+  fi
+done
+
+if command -v dev >/dev/null 2>&1 && command -v newtask >/dev/null 2>&1; then
+  pass 'dev and newtask are on PATH'
+else
+  fail 'dev or newtask is not on PATH; restart Ghostty after installation'
+fi
+
+if [ -n "${TMUX:-}" ]; then
+  info "Current terminal: TERM=${TERM:-unknown}, inside tmux"
+else
+  info "Current terminal: TERM=${TERM:-unknown}, outside tmux"
+fi
+
+printf '\nResult: %d passed, %d failed\n' "$PASS_COUNT" "$FAIL_COUNT"
+[ "$FAIL_COUNT" -eq 0 ]

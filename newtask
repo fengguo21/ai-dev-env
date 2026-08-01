@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+if [ "$#" -lt 1 ] || [ "$#" -gt 2 ]; then
+  printf 'Usage: newtask TASK_NAME [BASE_REF]\n' >&2
+  printf 'Example: newtask auth HEAD\n' >&2
+  exit 2
+fi
+
+TASK_NAME="$1"
+BASE_REF="${2:-HEAD}"
+
+case "$TASK_NAME" in
+  *[!A-Za-z0-9._-]*|'')
+    printf 'newtask: task names may contain only letters, numbers, ., _ and -\n' >&2
+    exit 2
+    ;;
+esac
+
+command -v git >/dev/null 2>&1 || {
+  printf 'newtask: git is not installed\n' >&2
+  exit 1
+}
+
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || {
+  printf 'newtask: run this command inside a Git repository\n' >&2
+  exit 1
+}
+
+git rev-parse --verify "${BASE_REF}^{commit}" >/dev/null 2>&1 || {
+  printf 'newtask: base ref is not a commit: %s\n' "$BASE_REF" >&2
+  printf 'If this is a new repository, create the initial commit first.\n' >&2
+  exit 1
+}
+
+PRIMARY_ROOT="$(git worktree list --porcelain | awk '/^worktree / { sub(/^worktree /, ""); print; exit }')"
+REPO_NAME="$(basename -- "$PRIMARY_ROOT")"
+WORKTREE_ROOT="${AI_WORKTREE_ROOT:-$(dirname -- "$PRIMARY_ROOT")/${REPO_NAME}_worktrees}"
+WORKTREE_PATH="${WORKTREE_ROOT}/${TASK_NAME}"
+BRANCH_NAME="feature/${TASK_NAME}"
+
+git check-ref-format --branch "$BRANCH_NAME" >/dev/null
+mkdir -p "$WORKTREE_ROOT"
+
+if git show-ref --verify --quiet "refs/heads/${BRANCH_NAME}"; then
+  git -C "$REPO_ROOT" worktree add "$WORKTREE_PATH" "$BRANCH_NAME"
+else
+  git -C "$REPO_ROOT" worktree add -b "$BRANCH_NAME" "$WORKTREE_PATH" "$BASE_REF"
+fi
+
+printf 'Created worktree\n'
+printf '  branch: %s\n' "$BRANCH_NAME"
+printf '  path:   %s\n' "$WORKTREE_PATH"
+printf '\nNext: dev %q\n' "$WORKTREE_PATH"
