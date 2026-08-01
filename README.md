@@ -23,7 +23,7 @@ and installed configuration are v1.1.
 - Ghostty confirms closing surfaces that still contain a running process
 - Existing Ghostty/tmux configs and helper commands are backed up before install
 - Uninstall restores the latest backup only when managed files were not edited
-- tmux window names stay stable: `codex`, `backend`, `frontend`, `services`, etc.
+- tmux window names stay stable: `codex`, `codex-claude`, `backend-frontend`, etc.
 - New tmux windows and panes inherit the active Git worktree directory
 - TPM installs `tmux-resurrect`, `tmux-continuum`, and `tmux-yank`
 - `dev` creates one reusable tmux session per project instead of one global session
@@ -65,9 +65,28 @@ dev /path/to/project
 dev /path/to/project --no-codex
 ```
 
-The default layout contains `codex`, `backend`, `frontend`, `services`, `test`,
-and `git`. Backend/frontend subdirectories are detected automatically. If
-Codex is installed, it starts in the `codex` window unless `--no-codex` is set.
+The default layout starts with two side-by-side AI workspaces: `codex` runs
+Codex in both panes, while `codex-claude` runs Codex on the left and Claude Code
+on the right. Codex starts with `--dangerously-bypass-approvals-and-sandbox`, and
+Claude Code starts with `--dangerously-skip-permissions`. These modes grant the
+agents unrestricted command execution and should be used only in trusted
+projects. The `backend-frontend` window puts the detected backend directory on
+the left and frontend directory on the right. The remaining windows are
+`services`, `test`, and `git`; backend/frontend subdirectories are detected
+automatically.
+`--no-codex` leaves the three Codex panes at a shell prompt, and missing CLI
+commands are left as shell panes.
+
+The `git` window starts LazyGit automatically when it is available and falls
+back to `git status --short --branch` otherwise. The installer also provides
+Delta for readable diffs and GitHub CLI for pull requests and CI:
+
+```bash
+lazygit
+git diff
+gh pr create
+gh pr checks --watch
+```
 
 Create a parallel Git worktree from the current commit or another base ref:
 

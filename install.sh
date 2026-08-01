@@ -95,13 +95,28 @@ if ! command -v git >/dev/null 2>&1; then
   "$BREW_EXECUTABLE" install git
 fi
 
-if ! "$BREW_EXECUTABLE" list --cask font-jetbrains-mono-nerd-font >/dev/null 2>&1; then
-  log "Installing JetBrains Mono Nerd Font."
-  "$BREW_EXECUTABLE" install --cask font-jetbrains-mono-nerd-font
+if ! command -v lazygit >/dev/null 2>&1; then
+  log "Installing LazyGit."
+  "$BREW_EXECUTABLE" install lazygit
+fi
+
+if ! command -v delta >/dev/null 2>&1; then
+  log "Installing Delta."
+  "$BREW_EXECUTABLE" install git-delta
+fi
+
+if ! command -v gh >/dev/null 2>&1; then
+  log "Installing GitHub CLI."
+  "$BREW_EXECUTABLE" install gh
 fi
 
 GHOSTTY_EXECUTABLE="$(find_ghostty || true)"
 [ -n "$GHOSTTY_EXECUTABLE" ] || fail "Ghostty was installed but its executable could not be found."
+
+if ! "$GHOSTTY_EXECUTABLE" +list-fonts | grep -Fxq "JetBrainsMono Nerd Font Mono"; then
+  log "Installing JetBrains Mono Nerd Font."
+  "$BREW_EXECUTABLE" install --cask font-jetbrains-mono-nerd-font
+fi
 
 mkdir -p "$GHOSTTY_CONFIG_DIR" "$LOCAL_BIN_DIR" "$BACKUP_DIR"
 

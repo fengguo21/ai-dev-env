@@ -48,7 +48,7 @@ validate_tmux_config() {
 printf 'AI Dev Environment v1.1 doctor\n\n'
 
 if GHOSTTY_BIN="$(find_ghostty)"; then
-  pass "$($GHOSTTY_BIN +version | head -1)"
+  pass "$("$GHOSTTY_BIN" +version | head -1)"
 else
   fail 'Ghostty is not installed'
   GHOSTTY_BIN=""
@@ -65,6 +65,14 @@ if command -v git >/dev/null 2>&1; then
 else
   fail 'git is not installed'
 fi
+
+for git_tool in lazygit delta gh; do
+  if command -v "$git_tool" >/dev/null 2>&1; then
+    pass "Git tool installed: ${git_tool}"
+  else
+    fail "Git tool missing: ${git_tool}"
+  fi
+done
 
 if [ -n "$GHOSTTY_BIN" ] && [ -f "${HOME}/.config/ghostty/config" ] && \
    "$GHOSTTY_BIN" +validate-config --config-file="${HOME}/.config/ghostty/config"; then

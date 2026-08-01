@@ -99,18 +99,47 @@ for candidate in frontend web ui; do
 done
 
 tmux new-session -d -s "$SESSION_NAME" -n codex -c "$PROJECT_DIR"
-tmux new-window -d -t "=${SESSION_NAME}" -n backend -c "$BACKEND_DIR"
-tmux new-window -d -t "=${SESSION_NAME}" -n frontend -c "$FRONTEND_DIR"
+CODEX_LEFT_PANE="$(tmux display-message -p -t "=${SESSION_NAME}:codex" '#{pane_id}')"
+CODEX_RIGHT_PANE="$(
+  tmux split-window -h -P -F '#{pane_id}' -t "$CODEX_LEFT_PANE" -c "$PROJECT_DIR"
+)"
+
+MIXED_LEFT_PANE="$(
+  tmux new-window -d -P -F '#{pane_id}' -t "=${SESSION_NAME}" \
+    -n codex-claude -c "$PROJECT_DIR"
+)"
+MIXED_RIGHT_PANE="$(
+  tmux split-window -h -P -F '#{pane_id}' -t "$MIXED_LEFT_PANE" -c "$PROJECT_DIR"
+)"
+
+BACKEND_LEFT_PANE="$(
+  tmux new-window -d -P -F '#{pane_id}' -t "=${SESSION_NAME}" \
+    -n backend-frontend -c "$BACKEND_DIR"
+)"
+tmux split-window -h -t "$BACKEND_LEFT_PANE" -c "$FRONTEND_DIR"
+
 tmux new-window -d -t "=${SESSION_NAME}" -n services -c "$PROJECT_DIR"
 tmux new-window -d -t "=${SESSION_NAME}" -n test -c "$PROJECT_DIR"
 tmux new-window -d -t "=${SESSION_NAME}" -n git -c "$PROJECT_DIR"
 
 if [ "$START_CODEX" -eq 1 ] && command -v codex >/dev/null 2>&1; then
-  tmux send-keys -t "=${SESSION_NAME}:codex" codex C-m
+  for pane_id in "$CODEX_LEFT_PANE" "$CODEX_RIGHT_PANE" "$MIXED_LEFT_PANE"; do
+    tmux send-keys -t "$pane_id" \
+      'codex --dangerously-bypass-approvals-and-sandbox' C-m
+  done
+fi
+
+if command -v claude >/dev/null 2>&1; then
+  tmux send-keys -t "$MIXED_RIGHT_PANE" \
+    'claude --dangerously-skip-permissions' C-m
 fi
 
 if git -C "$PROJECT_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-  tmux send-keys -t "=${SESSION_NAME}:git" 'git status --short --branch' C-m
+  if command -v lazygit >/dev/null 2>&1; then
+    tmux send-keys -t "=${SESSION_NAME}:git" lazygit C-m
+  else
+    tmux send-keys -t "=${SESSION_NAME}:git" 'git status --short --branch' C-m
+  fi
 fi
 
 if [ -f "$PROJECT_DIR/compose.yml" ] || [ -f "$PROJECT_DIR/compose.yaml" ] || \
