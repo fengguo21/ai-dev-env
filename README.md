@@ -1,4 +1,4 @@
-renyakundvdddd
+renyakundvddddsdfsfs
 
 
 # AI Dev Environment for macOS v1.1
@@ -70,13 +70,15 @@ dev /path/to/project --no-codex
 
 The default layout starts with two side-by-side AI workspaces: `codex` runs
 Codex in both panes, while `codex-claude` runs Codex on the left and Claude Code
-on the right. Codex starts with `--dangerously-bypass-approvals-and-sandbox`, and
-Claude Code starts with `--dangerously-skip-permissions`. These modes grant the
-agents unrestricted command execution and should be used only in trusted
-projects. The `backend-frontend` window puts the detected backend directory on
-the left and frontend directory on the right. The remaining windows are
-`services`, `test`, and `git`; backend/frontend subdirectories are detected
-automatically.
+on the right. Codex starts with the flagship `gpt-5.6-sol` model, `ultra`
+reasoning (maximum reasoning plus automatic subagent delegation), the `fast`
+service tier, and `--dangerously-bypass-approvals-and-sandbox`. Claude Code
+starts with `--dangerously-skip-permissions`. Ultra and Fast consume more usage;
+the permission-bypass modes grant the agents unrestricted command execution and
+should be used only in trusted, externally isolated projects. The
+`backend-frontend` window puts the detected backend directory on the left and
+frontend directory on the right. The remaining windows are `services`, `test`,
+and `git`; backend/frontend subdirectories are detected automatically.
 `--no-codex` leaves the three Codex panes at a shell prompt, and missing CLI
 commands are left as shell panes.
 

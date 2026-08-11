@@ -13,6 +13,7 @@ EOF
 PROJECT_INPUT=""
 SESSION_NAME=""
 START_CODEX=1
+CODEX_LAUNCH_COMMAND='codex --model gpt-5.6-sol --config model_reasoning_effort=ultra --config service_tier=fast --enable multi_agent --enable fast_mode --dangerously-bypass-approvals-and-sandbox'
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -124,8 +125,7 @@ tmux new-window -d -t "=${SESSION_NAME}" -n git -c "$PROJECT_DIR"
 
 if [ "$START_CODEX" -eq 1 ] && command -v codex >/dev/null 2>&1; then
   for pane_id in "$CODEX_LEFT_PANE" "$CODEX_RIGHT_PANE" "$MIXED_LEFT_PANE"; do
-    tmux send-keys -t "$pane_id" \
-      'codex --dangerously-bypass-approvals-and-sandbox' C-m
+    tmux send-keys -t "$pane_id" "$CODEX_LAUNCH_COMMAND" C-m
   done
 fi
 
