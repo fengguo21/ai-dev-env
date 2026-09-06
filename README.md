@@ -70,9 +70,12 @@ dev /path/to/project --no-codex
 
 The default layout starts with two side-by-side AI workspaces: `codex` runs
 Codex in both panes, while `codex-claude` runs Codex on the left and Claude Code
-on the right. Codex starts with the flagship `gpt-5.6-sol` model, `ultra`
-reasoning (maximum reasoning plus automatic subagent delegation), the `fast`
-service tier, and `--dangerously-bypass-approvals-and-sandbox`. Claude Code
+on the right. For every new tmux session, `dev` reads the current Codex model
+catalog, selects its highest-priority visible model, and uses that model's
+strongest supported reasoning level. This currently resolves to `gpt-6-astra`
+with `ultra` reasoning (maximum reasoning plus automatic subagent delegation).
+The `fast` service tier is enabled when the selected model supports it. Codex
+also starts with `--dangerously-bypass-approvals-and-sandbox`, while Claude Code
 starts with `--dangerously-skip-permissions`. Ultra and Fast consume more usage;
 the permission-bypass modes grant the agents unrestricted command execution and
 should be used only in trusted, externally isolated projects. The
@@ -81,6 +84,12 @@ frontend directory on the right. The remaining windows are `services`, `test`,
 and `git`; backend/frontend subdirectories are detected automatically.
 `--no-codex` leaves the three Codex panes at a shell prompt, and missing CLI
 commands are left as shell panes.
+
+Dynamic selection uses the experimental `codex debug models` catalog and its
+priority ordering because Codex does not provide a stable `latest-strongest`
+model alias. If the live catalog cannot be read, `dev` tries the catalog bundled
+with the installed CLI and then falls back to GPT-6 Astra with Ultra. Keep Codex
+CLI current so it can use newly released models.
 
 The `git` window starts LazyGit automatically when it is available and falls
 back to `git status --short --branch` otherwise. The installer also provides

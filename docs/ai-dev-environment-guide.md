@@ -384,14 +384,16 @@ frontend → web → ui → 项目根目录
 
 ### AI CLI 权限警告
 
-默认 `dev` 使用以下命令启动 AI：
+`dev` 会在创建新 tmux Session 时读取 Codex 当前模型目录，选择优先级最高的可见模型，并使用该模型支持的最强推理档位。以当前解析结果为例，启动命令是：
 
 ```bash
-codex --model gpt-5.6-sol --config model_reasoning_effort=ultra --config service_tier=fast --enable multi_agent --enable fast_mode --dangerously-bypass-approvals-and-sandbox
+codex --model gpt-6-astra --config model_reasoning_effort=ultra --config service_tier=fast --enable multi_agent --enable fast_mode --dangerously-bypass-approvals-and-sandbox
 claude --dangerously-skip-permissions
 ```
 
-Codex 使用当前旗舰 `gpt-5.6-sol`、`ultra` 推理档位（最大推理并自动委派子代理）和 `fast` 服务层启动。Ultra 可能延长复杂任务的总处理时间，Fast 会加快模型输出；两者都会增加 Token/额度和并行任务用量。
+当前 Codex 模型目录会解析为能力最强的 `gpt-6-astra` 和 `ultra` 推理档位（最大推理并自动委派子代理）。如果以后出现新的最强模型，`dev` 会自动跟随，并从 Ultra、Max、Extra High 等该模型支持的档位中选择最高档；所选模型支持 Fast 时也会自动启用 `fast` 服务层。实时目录查询失败时，脚本会依次退回 CLI 内置目录和已知可用的 GPT-6 Astra + Ultra。Ultra 可能延长复杂任务的总处理时间，Fast 会加快模型输出；两者都会增加 Token/额度和并行任务用量。
+
+Codex 目前没有稳定的 `latest-strongest` 模型别名，因此这里使用实验性的 `codex debug models` 目录及其优先级排序作为自动选择依据。OpenAI 可能在后续 CLI 中调整该实验性接口；脚本的两级回退可保证它仍能启动，但要让新模型正常可用，仍应及时更新 Codex CLI。
 
 这两个参数都会绕过重要的安全边界：
 

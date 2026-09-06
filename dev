@@ -13,7 +13,142 @@ EOF
 PROJECT_INPUT=""
 SESSION_NAME=""
 START_CODEX=1
-CODEX_LAUNCH_COMMAND='codex --model gpt-5.6-sol --config model_reasoning_effort=ultra --config service_tier=fast --enable multi_agent --enable fast_mode --dangerously-bypass-approvals-and-sandbox'
+CODEX_MODEL="gpt-6-astra"
+CODEX_REASONING_EFFORT="ultra"
+CODEX_FAST_MODE=1
+CODEX_LAUNCH_COMMAND=""
+
+resolve_strongest_codex_settings() {
+  local catalog_file=""
+  local model_index=0
+  local model_slug=""
+  local model_visibility=""
+  local model_priority=""
+  local best_model=""
+  local best_model_index=""
+  local best_priority=""
+  local effort_index=0
+  local effort=""
+  local effort_rank=0
+  local best_effort=""
+  local best_effort_rank=0
+  local speed_index=0
+  local speed_tier=""
+  local supports_fast=0
+
+  # The installer targets macOS, where plutil provides a dependency-free JSON
+  # parser. Keep the known strongest settings above as a safe fallback.
+  if [ ! -x /usr/bin/plutil ]; then
+    printf 'dev: cannot inspect the Codex model catalog; using %s (%s)\n' \
+      "$CODEX_MODEL" "$CODEX_REASONING_EFFORT" >&2
+    return 0
+  fi
+  catalog_file="$(mktemp "${TMPDIR:-/tmp}/ai-dev-env-models.XXXXXX")" || {
+    printf 'dev: cannot create a temporary model catalog; using %s (%s)\n' \
+      "$CODEX_MODEL" "$CODEX_REASONING_EFFORT" >&2
+    return 0
+  }
+
+  # Prefer the account-aware catalog, then the catalog bundled with the CLI.
+  if ! codex debug models > "$catalog_file" 2>/dev/null || \
+     ! /usr/bin/plutil -extract models.0.slug raw \
+       -o /dev/null "$catalog_file" >/dev/null 2>&1; then
+    if ! codex debug models --bundled > "$catalog_file" 2>/dev/null || \
+       ! /usr/bin/plutil -extract models.0.slug raw \
+         -o /dev/null "$catalog_file" >/dev/null 2>&1; then
+      rm -f -- "$catalog_file"
+      printf 'dev: cannot read the Codex model catalog; using %s (%s)\n' \
+        "$CODEX_MODEL" "$CODEX_REASONING_EFFORT" >&2
+      return 0
+    fi
+  fi
+
+  while model_slug="$(
+    /usr/bin/plutil -extract "models.${model_index}.slug" raw \
+      -o - "$catalog_file" 2>/dev/null
+  )"; do
+    model_visibility="$(
+      /usr/bin/plutil -extract "models.${model_index}.visibility" raw \
+        -o - "$catalog_file" 2>/dev/null || true
+    )"
+    model_priority="$(
+      /usr/bin/plutil -extract "models.${model_index}.priority" raw \
+        -o - "$catalog_file" 2>/dev/null || true
+    )"
+    case "$model_priority" in
+      ''|*[!0-9]*) model_priority="$model_index" ;;
+    esac
+
+    case "$model_slug" in
+      ''|*[!A-Za-z0-9._-]*) ;;
+      *)
+        if [ "$model_visibility" = "list" ] && \
+           { [ -z "$best_priority" ] || [ "$model_priority" -lt "$best_priority" ]; }; then
+          best_model="$model_slug"
+          best_model_index="$model_index"
+          best_priority="$model_priority"
+        fi
+        ;;
+    esac
+
+    model_index=$((model_index + 1))
+  done
+
+  if [ -n "$best_model_index" ]; then
+    while effort="$(
+      /usr/bin/plutil \
+        -extract "models.${best_model_index}.supported_reasoning_levels.${effort_index}.effort" \
+        raw -o - "$catalog_file" 2>/dev/null
+    )"; do
+      case "$effort" in
+        ultra) effort_rank=6 ;;
+        max) effort_rank=5 ;;
+        xhigh) effort_rank=4 ;;
+        high) effort_rank=3 ;;
+        medium) effort_rank=2 ;;
+        low) effort_rank=1 ;;
+        *) effort_rank=0 ;;
+      esac
+      if [ "$effort_rank" -gt "$best_effort_rank" ]; then
+        best_effort="$effort"
+        best_effort_rank="$effort_rank"
+      fi
+      effort_index=$((effort_index + 1))
+    done
+
+    while speed_tier="$(
+      /usr/bin/plutil \
+        -extract "models.${best_model_index}.additional_speed_tiers.${speed_index}" \
+        raw -o - "$catalog_file" 2>/dev/null
+    )"; do
+      if [ "$speed_tier" = "fast" ]; then
+        supports_fast=1
+        break
+      fi
+      speed_index=$((speed_index + 1))
+    done
+  fi
+
+  rm -f -- "$catalog_file"
+
+  if [ -n "$best_model" ] && [ -n "$best_effort" ]; then
+    CODEX_MODEL="$best_model"
+    CODEX_REASONING_EFFORT="$best_effort"
+    CODEX_FAST_MODE="$supports_fast"
+  else
+    printf 'dev: no eligible model found in the Codex catalog; using %s (%s)\n' \
+      "$CODEX_MODEL" "$CODEX_REASONING_EFFORT" >&2
+  fi
+}
+
+build_codex_launch_command() {
+  resolve_strongest_codex_settings
+  CODEX_LAUNCH_COMMAND="codex --model $CODEX_MODEL --config model_reasoning_effort=$CODEX_REASONING_EFFORT"
+  if [ "$CODEX_FAST_MODE" -eq 1 ]; then
+    CODEX_LAUNCH_COMMAND="$CODEX_LAUNCH_COMMAND --config service_tier=fast --enable fast_mode"
+  fi
+  CODEX_LAUNCH_COMMAND="$CODEX_LAUNCH_COMMAND --enable multi_agent --dangerously-bypass-approvals-and-sandbox"
+}
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -99,6 +234,10 @@ for candidate in frontend web ui; do
   fi
 done
 
+if [ "$START_CODEX" -eq 1 ] && command -v codex >/dev/null 2>&1; then
+  build_codex_launch_command
+fi
+
 tmux new-session -d -s "$SESSION_NAME" -n codex -c "$PROJECT_DIR"
 CODEX_LEFT_PANE="$(tmux display-message -p -t "=${SESSION_NAME}:codex" '#{pane_id}')"
 CODEX_RIGHT_PANE="$(
@@ -123,7 +262,7 @@ tmux new-window -d -t "=${SESSION_NAME}" -n services -c "$PROJECT_DIR"
 tmux new-window -d -t "=${SESSION_NAME}" -n test -c "$PROJECT_DIR"
 tmux new-window -d -t "=${SESSION_NAME}" -n git -c "$PROJECT_DIR"
 
-if [ "$START_CODEX" -eq 1 ] && command -v codex >/dev/null 2>&1; then
+if [ -n "$CODEX_LAUNCH_COMMAND" ]; then
   for pane_id in "$CODEX_LEFT_PANE" "$CODEX_RIGHT_PANE" "$MIXED_LEFT_PANE"; do
     tmux send-keys -t "$pane_id" "$CODEX_LAUNCH_COMMAND" C-m
   done

@@ -252,7 +252,8 @@ dev --help  # [只读] 显示 dev 用法和参数
 
 注意：
 
-- 默认新 Session 会启动三个 `codex --model gpt-5.6-sol --config model_reasoning_effort=ultra --config service_tier=fast --enable multi_agent --enable fast_mode --dangerously-bypass-approvals-and-sandbox` 和一个 `claude --dangerously-skip-permissions`。Codex 因此使用旗舰模型、最大推理与自动子代理委派，并选择更快但用量更高的 Fast 服务层。
+- 默认新 Session 会读取 Codex 当前模型目录，启动三个使用优先级最高可见模型及其最强推理档位的 Codex，并启动一个 `claude --dangerously-skip-permissions`。当前解析结果是 `codex --model gpt-6-astra --config model_reasoning_effort=ultra --config service_tier=fast --enable fast_mode --enable multi_agent --dangerously-bypass-approvals-and-sandbox`。所选模型支持 Fast 时，Codex 也会选择更快但用量更高的 Fast 服务层；实时目录失败时会退回 CLI 内置目录，再退回 GPT-6 Astra + Ultra。
+- Codex 没有稳定的 `latest-strongest` 模型别名。这里使用实验性的 `codex debug models` 目录优先级进行动态选择；应及时更新 Codex CLI，以便客户端识别新发布的模型。
 - `--no-codex` 不等于 `--no-claude`；当前脚本没有后者。
 - 同名 Session 已存在时，`dev` 直接 Attach，创建参数不会停止或改变已有进程。
 - 需要普通 Claude 权限时，先结束右侧 Pane 中自动启动的 Claude，再手动运行不带危险参数的命令。
@@ -265,7 +266,7 @@ dev --help  # [只读] 显示 dev 用法和参数
 
 ```zsh
 codex  # [启动] 使用当前目录和默认配置启动交互式 Codex TUI
-codex --model gpt-5.6-sol --config model_reasoning_effort=ultra --config service_tier=fast --enable multi_agent --enable fast_mode  # [启动/高用量] 使用旗舰模型、Ultra 自动委派和 Fast 服务层
+codex --model gpt-6-astra --config model_reasoning_effort=ultra --config service_tier=fast --enable multi_agent --enable fast_mode  # [启动/高用量] 使用能力最强的 GPT-6 Astra、Ultra 自动委派和 Fast 服务层
 codex -C /path/to/project  # [启动] 在指定工作根目录启动；-C = --cd = Change Directory
 codex --sandbox read-only --ask-for-approval on-request  # [启动] 使用只读沙箱并按需批准；-s = --sandbox，-a = --ask-for-approval
 codex --sandbox workspace-write --ask-for-approval on-request  # [启动] 允许工作区写入并按需批准；可短写为 -s workspace-write -a on-request
