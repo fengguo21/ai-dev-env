@@ -1,0 +1,276 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+SCRIPT_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+COMMON_PATH="$SCRIPT_ROOT/lib/common.sh"
+if [ ! -r "$COMMON_PATH" ]; then
+  COMMON_PATH="${AI_DEV_HOME:-$HOME}/.local/share/ai-dev-env/common.sh"
+fi
+if [ ! -r "$COMMON_PATH" ]; then
+  printf 'task: shared helpers are missing; rerun install.sh\n' >&2
+  exit 1
+fi
+source "$COMMON_PATH"
+
+usage() {
+  printf '%s\n' \
+    'Usage:' \
+    '  task new NAME [BASE_REF] [--no-open] [DEV_OPTIONS]' \
+    '  task open NAME [DEV_OPTIONS]' \
+    '  task list' \
+    '  task pick [DEV_OPTIONS]' \
+    '  task done NAME [--base REF] [--apply] [--keep-branch]' \
+    '                 [--allow-unpushed] [--allow-ignored]' \
+    '' \
+    'new creates a worktree and opens dev; --no-open only creates it.' \
+    'open finds the registered feature/NAME worktree, including older paths.' \
+    'list shows task, branch, changes, session, and absolute path.' \
+    'pick uses fzf if installed, otherwise an interactive numbered selector.' \
+    'done previews cleanup. --apply requires a clean linked worktree, a branch' \
+    'merged into --base (default: primary worktree HEAD), remote-reachable commits,' \
+    'and no associated tmux session. It never force-removes a worktree or branch.' \
+    '--allow-unpushed permits cleanup without a containing remote-tracking ref.' \
+    '--allow-ignored permits deleting ignored files, including local .env files.' \
+    '--keep-branch removes only the worktree after the same safety checks.' \
+    'DEV_OPTIONS: --resume, --detached, --no-ai, --no-codex, --no-claude,' \
+    '             --start, --plan, --check, --unsafe, --restore-layout,' \
+    '             --profile standard|deep, --layout classic|focus|pair|full, --session NAME.' \
+    'Additional dev options can follow --. Remote status uses local refs; fetch' \
+    'before cleanup when you need up-to-date information. No push/PR is automatic.'
+}
+fail() { printf 'task: %s\n' "$*" >&2; exit 1; }
+COMMAND="${1:---help}"
+case "$COMMAND" in --help|-h|help) usage; exit 0 ;; esac
+shift
+case "${1:-}" in --help|-h) usage; exit 0 ;; esac
+command -v git >/dev/null 2>&1 || fail 'git is not installed'
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || fail 'run inside a Git repository'
+PRIMARY_ROOT="$(ai_repo_primary "$REPO_ROOT")"
+
+load_worktrees() {
+  WT_PATHS=()
+  WT_BRANCHES=()
+  local record path='' branch=''
+  while IFS= read -r -d '' record; do
+    case "$record" in
+      'worktree '*) path="${record#worktree }"; branch='' ;;
+      'branch '*) branch="${record#branch refs/heads/}" ;;
+      '')
+        if [ -n "$path" ]; then
+          WT_PATHS[${#WT_PATHS[@]}]="$path"
+          WT_BRANCHES[${#WT_BRANCHES[@]}]="${branch:-(detached)}"
+        fi
+        path='' ;;
+    esac
+  done < <(git -C "$REPO_ROOT" worktree list --porcelain -z)
+}
+validate_name() {
+  case "$1" in *[!A-Za-z0-9._-]*|'') fail 'invalid task name' ;; esac
+  git check-ref-format --branch "feature/$1" >/dev/null || fail 'invalid task name'
+}
+select_task() {
+  validate_name "$1"
+  load_worktrees
+  local i
+  for ((i=0; i<${#WT_PATHS[@]}; i++)); do
+    if [ "${WT_BRANCHES[$i]}" = "feature/$1" ]; then
+      TASK_PATH="${WT_PATHS[$i]}"
+      TASK_BRANCH="${WT_BRANCHES[$i]}"
+      return 0
+    fi
+  done
+  fail "no registered worktree for feature/$1; run task list"
+}
+session_state() {
+  local path="$1" session pane_path
+  session="$(ai_session_name "$path")"
+  if ! command -v tmux >/dev/null 2>&1; then printf '%s\n' '-'; return; fi
+  if tmux has-session -t "=$session" >/dev/null 2>&1; then
+    printf '%s\n' "$session"
+    return
+  fi
+  while IFS=$'\t' read -r session pane_path; do
+    if [ "$pane_path" = "$path" ]; then printf '%s\n' "$session"; return; fi
+  done < <(tmux list-sessions -F $'#{session_name}\t#{@ai_project}' 2>/dev/null || true)
+  # Include custom/legacy sessions whose panes are still inside this worktree.
+  while IFS=$'\t' read -r session pane_path; do
+    case "$pane_path" in
+      "$path"|"$path"/*) printf '%s\n' "$session"; return ;;
+    esac
+  done < <(tmux list-panes -a -F $'#{session_name}\t#{pane_current_path}' 2>/dev/null || true)
+  printf '%s\n' '-'
+}
+list_tasks() {
+  load_worktrees
+  printf 'TASK\tBRANCH\tCHANGES\tSESSION\tPATH\n'
+  local i path branch changes session
+  for ((i=0; i<${#WT_PATHS[@]}; i++)); do
+    path="${WT_PATHS[$i]}"; branch="${WT_BRANCHES[$i]}"
+    case "$branch" in feature/*) ;; *) continue ;; esac
+    if [ ! -d "$path" ]; then
+      changes=missing; session=-
+    else
+      changes="$(git -C "$path" status --porcelain --untracked-files=normal 2>/dev/null)" || changes=unavailable
+      if [ "$changes" != unavailable ]; then
+        if [ -n "$changes" ]; then changes=dirty; else changes=clean; fi
+      fi
+      session="$(session_state "$path")"
+    fi
+    printf '%s\t%s\t%s\t%s\t%s\n' "${branch#feature/}" "$branch" "$changes" "$session" "$path"
+  done
+}
+
+DEV_ARGS=()
+POSITIONAL=()
+NO_OPEN=false
+parse_open_args() {
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --no-open) NO_OPEN=true; shift ;;
+      --resume|--detached|--no-ai|--no-codex|--no-claude|--start|--plan|--check|--unsafe|--restore-layout)
+        DEV_ARGS[${#DEV_ARGS[@]}]="$1"; shift ;;
+      --profile|--layout|--session)
+        [ "$#" -ge 2 ] || fail "$1 needs a value"
+        DEV_ARGS[${#DEV_ARGS[@]}]="$1"; DEV_ARGS[${#DEV_ARGS[@]}]="$2"; shift 2 ;;
+      --)
+        shift
+        while [ "$#" -gt 0 ]; do DEV_ARGS[${#DEV_ARGS[@]}]="$1"; shift; done ;;
+      --*) fail "unknown option: $1" ;;
+      *) POSITIONAL[${#POSITIONAL[@]}]="$1"; shift ;;
+    esac
+  done
+}
+open_path() {
+  local dev_command
+  dev_command="$(ai_dev_exec)" || fail 'dev is not installed'
+  exec "$dev_command" "$1" ${DEV_ARGS[@]+"${DEV_ARGS[@]}"}
+}
+
+done_task() {
+  [ "$#" -ge 1 ] || fail 'usage: task done NAME [--apply] [--base REF]'
+  local name="$1" base='' apply=false keep_branch=false allow_unpushed=false allow_ignored=false
+  shift
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --base) [ "$#" -ge 2 ] || fail '--base needs a value'; base="$2"; shift 2 ;;
+      --apply) apply=true; shift ;;
+      --keep-branch) keep_branch=true; shift ;;
+      --allow-unpushed) allow_unpushed=true; shift ;;
+      --allow-ignored) allow_ignored=true; shift ;;
+      *) fail "unknown cleanup option: $1" ;;
+    esac
+  done
+  select_task "$name"
+  [ -d "$TASK_PATH" ] || fail 'worktree directory is missing; inspect git worktree list'
+  TASK_PATH="$(ai_canonical_dir "$TASK_PATH")"
+  [ "$TASK_PATH" != "$PRIMARY_ROOT" ] || fail 'the primary worktree cannot be removed'
+  [ "$(ai_repo_primary "$TASK_PATH")" = "$PRIMARY_ROOT" ] || fail 'worktree directory now belongs to another repository; nothing was removed'
+  [ "$(git -C "$TASK_PATH" symbolic-ref -q HEAD)" = "refs/heads/$TASK_BRANCH" ] || fail 'worktree checkout no longer matches its registered task; nothing was removed'
+  local base_commit target_commit dirty ignored remote_refs session blocked=false
+  if [ -n "$base" ]; then
+    base_commit="$(git rev-parse --verify --end-of-options "${base}^{commit}" 2>/dev/null)" || fail "invalid base: $base"
+  else
+    base_commit="$(git -C "$PRIMARY_ROOT" rev-parse --verify HEAD)"
+    base='primary HEAD'
+  fi
+  target_commit="$(git rev-parse --verify "refs/heads/$TASK_BRANCH")"
+  dirty="$(git -C "$TASK_PATH" status --porcelain --untracked-files=all)"
+  ignored="$(git -C "$TASK_PATH" ls-files --others --ignored --exclude-standard --directory)"
+  remote_refs="$(git for-each-ref --format='%(refname:short)' --contains "$target_commit" refs/remotes/)"
+  session="$(session_state "$TASK_PATH")"
+  printf 'Cleanup preview\n  task: %s\n  path: %s\n  branch: %s\n  base: %s (%s)\n' "$name" "$TASK_PATH" "$TASK_BRANCH" "$base" "$base_commit"
+  if $keep_branch; then printf '  action: remove worktree, keep branch\n'; else printf '  action: remove worktree and safely delete branch\n'; fi
+  if [ -n "$dirty" ]; then printf 'BLOCKED: uncommitted or untracked files\n%s\n' "$dirty"; blocked=true; fi
+  if [ -n "$ignored" ]; then
+    if $allow_ignored; then
+      printf 'NOTICE: ignored files will be deleted (--allow-ignored)\n%s\n' "$ignored"
+    else
+      printf 'BLOCKED: ignored files would be deleted; preserve them or explicitly use --allow-ignored\n%s\n' "$ignored"
+      blocked=true
+    fi
+  fi
+  if ! git merge-base --is-ancestor "$target_commit" "$base_commit"; then
+    printf 'BLOCKED: branch is not merged into %s\n' "$base"; blocked=true
+  fi
+  if [ -z "$remote_refs" ] && ! $allow_unpushed; then
+    printf 'BLOCKED: no remote-tracking ref contains this commit; fetch first or explicitly use --allow-unpushed\n'
+    blocked=true
+  fi
+  if [ "$session" != '-' ]; then
+    printf 'BLOCKED: tmux session %s is still associated with this worktree; save work and close it first\n' "$session"
+    blocked=true
+  fi
+  if ! $apply; then
+    if ! $blocked; then printf 'Ready. Run task done %s with the same options and --apply to clean up.\n' "$name"; fi
+    return 0
+  fi
+  if $blocked; then fail 'cleanup refused; nothing was removed'; fi
+  [ "$(git rev-parse --verify "refs/heads/$TASK_BRANCH")" = "$target_commit" ] || fail 'branch changed during checks; retry'
+  # Avoid deleting this command's working directory when invoked inside the task.
+  cd -- "$PRIMARY_ROOT"
+  git worktree remove -- "$TASK_PATH"
+  printf 'Removed worktree: %s\n' "$TASK_PATH"
+  if ! $keep_branch; then
+    if ! git branch -d -- "$TASK_BRANCH"; then
+      printf 'task: worktree removed; branch %s was preserved because Git refused safe deletion\n' "$TASK_BRANCH" >&2
+      return 1
+    fi
+  fi
+}
+
+case "$COMMAND" in
+  new)
+    parse_open_args "$@"
+    [ "${#POSITIONAL[@]}" -ge 1 ] && [ "${#POSITIONAL[@]}" -le 2 ] || fail 'usage: task new NAME [BASE_REF] [--no-open] [DEV_OPTIONS]'
+    NEWTASK="$SCRIPT_ROOT/newtask"
+    [ -x "$NEWTASK" ] || NEWTASK="$(command -v newtask)" || fail 'newtask is not installed'
+    TASK_PATH="$("$NEWTASK" --print-path "${POSITIONAL[@]}")"
+    printf 'Created %s\n' "$TASK_PATH"
+    if ! $NO_OPEN; then open_path "$TASK_PATH"; fi ;;
+  open)
+    parse_open_args "$@"
+    if $NO_OPEN; then fail '--no-open is only valid for task new'; fi
+    [ "${#POSITIONAL[@]}" -eq 1 ] || fail 'usage: task open NAME [DEV_OPTIONS]'
+    select_task "${POSITIONAL[0]}"
+    [ -d "$TASK_PATH" ] || fail 'worktree directory is missing'
+    open_path "$TASK_PATH" ;;
+  list)
+    [ "$#" -eq 0 ] || fail 'usage: task list'
+    list_tasks ;;
+  pick)
+    parse_open_args "$@"
+    if $NO_OPEN; then fail '--no-open is only valid for task new'; fi
+    [ "${#POSITIONAL[@]}" -eq 0 ] || fail 'usage: task pick [DEV_OPTIONS]'
+    if [ -t 0 ] && [ -t 1 ] && command -v fzf >/dev/null 2>&1; then
+      CHOICE="$(list_tasks | fzf --header-lines=1 --delimiter=$'\t' --prompt='Open task > ' \
+        --height=80% --layout=reverse --border --no-multi --with-nth=1,2,3,4 \
+        --header='Enter opens the task; Esc cancels')" || exit 0
+      NAME="${CHOICE%%$'\t'*}"
+    elif [ -t 0 ] && [ -t 1 ]; then
+      load_worktrees
+      NAMES=()
+      for ((i=0; i<${#WT_BRANCHES[@]}; i++)); do
+        case "${WT_BRANCHES[$i]}" in
+          feature/*)
+            NAMES[${#NAMES[@]}]="${WT_BRANCHES[$i]#feature/}"
+            printf '%s) %s  %s\n' "${#NAMES[@]}" "${WT_BRANCHES[$i]#feature/}" "${WT_PATHS[$i]}" ;;
+        esac
+      done
+      [ "${#NAMES[@]}" -gt 0 ] || fail 'no task worktrees found'
+      printf 'Task number (blank cancels): '
+      IFS= read -r CHOICE || exit 0
+      [ -n "$CHOICE" ] || exit 0
+      case "$CHOICE" in *[!0-9]*|0*) fail 'invalid task number' ;; esac
+      [ "${#CHOICE}" -le 8 ] && [ "$CHOICE" -le "${#NAMES[@]}" ] || fail 'invalid task number'
+      NAME="${NAMES[$((CHOICE - 1))]}"
+    else
+      list_tasks
+      printf '\nUse task open NAME, or install fzf for interactive selection.\n'
+      exit 0
+    fi
+    [ -n "$NAME" ] || exit 0
+    select_task "$NAME"
+    open_path "$TASK_PATH" ;;
+  done) done_task "$@" ;;
+  *) usage >&2; fail "unknown command: $COMMAND" ;;
+esac

@@ -1,10 +1,10 @@
-# AI Dev Environment 完整使用指南
+# AI Dev Environment v1.2 完整使用指南
 
 本文介绍本项目提供的整套 macOS AI 开发环境，包括 Ghostty、tmux、Codex CLI、Claude Code、Git Worktree、LazyGit、Delta、GitHub CLI、Docker Compose，以及配套的安装、检查和恢复命令。
 
 Git 工具的完整按键和命令说明另见 [LazyGit、Git Diff 与 GitHub CLI 使用指南](git-tools-guide.md)。
 
-需要快速复制和查询命令时，使用 [AI Dev Environment 命令查询手册](command-reference.md)。
+需要快速复制和查询命令时，使用 [AI Dev Environment 命令查询手册](command-reference.md)。v1.2 的设计依据见 [工作流调研与最佳实践](research-best-practices.md)。
 
 ## 1. 环境组成
 
@@ -14,10 +14,10 @@ Git 工具的完整按键和命令说明另见 [LazyGit、Git Diff 与 GitHub CL
 macOS
 └── Ghostty：终端窗口、字体、主题、剪贴板和滚动历史
     └── tmux：持久会话、窗口、分屏和布局恢复
-        └── dev：为每个项目创建标准工作区
-            ├── codex：两个 Codex CLI 面板
-            ├── codex-claude：Codex CLI + Claude Code
-            ├── backend-frontend：后端 + 前端命令
+        └── dev：按项目目录创建与复用工作区
+            ├── codex：左右两个 Codex
+            ├── codex-claude：Codex + 普通模式 Claude
+            ├── backend-frontend：后端 + 前端 Shell
             ├── services：Docker Compose 和其他服务
             ├── test：测试、Lint 和构建检查
             └── git：LazyGit、Delta 和 GitHub CLI
@@ -35,6 +35,7 @@ macOS
 | GitHub CLI `gh` | PR、CI、Issue 和仓库管理 | 是 |
 | `dev` | 创建项目 tmux 工作区 | 是 |
 | `newtask` | 创建并行 Git Worktree | 是 |
+| `task` | 新建、切换、查看和清理任务 | 是 |
 | `ai-dev-doctor` | 检查环境状态 | 是 |
 | Codex CLI | AI 编码终端客户端 | 否，需要单独安装 |
 | Claude Code | AI 编码终端客户端 | 否，需要单独安装 |
@@ -74,11 +75,15 @@ git push -u origin HEAD
 
 ### 安装或升级
 
-在任意目录运行：
+在本工具的仓库根目录运行：
 
 ```bash
-/Users/renyakun/work26/ai-dev-env-v1.0/install.sh
+./install.sh
 ```
+
+已装好依赖时可以使用 `./install.sh --skip-deps --no-reload`，只更新配置与辅助命令，并保留正在运行的 tmux 会话。完整安装参数和升级说明见 [README](../README.md) 与 `./install.sh --help`。
+
+升级会检查受管理文件是否被手动修改；有改动时默认停止覆盖。可以先把个人设置移到 local 配置，或检查差异后使用 `--replace-modified`，备份并替换这些文件。
 
 安装脚本会：
 
@@ -87,7 +92,7 @@ git push -u origin HEAD
 3. 安装 JetBrains Mono Nerd Font。
 4. 备份已有 Ghostty、tmux、Shell 和辅助命令配置。
 5. 安装 Ghostty 与 tmux 配置。
-6. 将 `dev`、`newtask` 和 `ai-dev-doctor` 安装到 `~/.local/bin`。
+6. 将 `dev`、`newtask`、`task` 和 `ai-dev-doctor` 安装到 `~/.local/bin`，共享辅助文件安装到 `~/.local/share/ai-dev-env/`。
 7. 安装 TPM、tmux-resurrect、tmux-continuum 和 tmux-yank。
 8. 验证 Ghostty 和 tmux 配置。
 
@@ -111,7 +116,7 @@ ai-dev-doctor
 - LazyGit、Delta 和 `gh` 是否安装；
 - Ghostty 配置、字体和主题是否有效；
 - tmux 配置和插件是否正常；
-- `dev` 与 `newtask` 是否位于 `PATH`。
+- `dev`、`newtask` 与 `task` 是否位于 `PATH`。
 
 查看常用工具版本：
 
@@ -136,9 +141,14 @@ tmux 使用大写 `-V` 表示 **Version（版本）**；其余示例使用可读
 |---|---|
 | Ghostty 配置 | `~/.config/ghostty/config` |
 | tmux 配置 | `~/.tmux.conf` |
+| tmux 个人覆盖配置 | `~/.tmux.local.conf` |
+| Ghostty 个人覆盖配置 | `~/.config/ghostty/config.local` |
+| 项目启动配置 | `<项目>/.ai-dev.conf` |
 | 辅助命令 | `~/.local/bin/` |
 | TPM 与插件 | `~/.tmux/plugins/` |
 | 安装状态和备份 | `~/.local/state/ai-dev-env/` |
+
+主题、字号、按键等个人调整放在对应的 local 文件中，避免和受管理的基础配置混在一起。项目配置格式见 [模板](../config/project.example.conf)。
 
 每次安装或升级前的配置会备份到：
 
@@ -223,6 +233,9 @@ Session（一个项目工作区）
 | 上一个/下一个窗口 | `Ctrl+a p` / `Ctrl+a n` |
 | 按编号切换窗口 | `Ctrl+a 1`～`Ctrl+a 9` |
 | 查看窗口列表 | `Ctrl+a w` |
+| 选择并打开任务 | `Ctrl+a t` |
+| 浏览项目会话树 | `Ctrl+a s` |
+| 查看任务命令帮助 | `Ctrl+a ?` |
 | 左右分屏 | `Ctrl+a \|` |
 | 上下分屏 | `Ctrl+a -` |
 | 切换 Pane | `Ctrl+a h/j/k/l` |
@@ -323,104 +336,95 @@ tmux-resurrect 能恢复布局、Pane 目录和部分程序，但不能保证重
 
 ## 5. `dev`：创建项目工作区
 
-### 基本用法
+### 默认启动与会话复用
 
-为当前目录启动工作区：
+在项目根目录或任意子目录启动：
 
 ```bash
 dev
-```
-
-指定项目或 Worktree：
-
-```bash
 dev /path/to/project
 ```
 
-不自动启动三个 Codex Pane：
+默认使用 `classic` 布局和 `deep` 配置，恢复原来的六窗口、九窗格：三个 Codex、一个普通模式 Claude，以及后端、前端、服务、测试和 Git 窗格。Deep 按可见模型目录选择高优先级模型及最高支持推理档位，支持时启用 Fast，并启用 `multi_agent`。所有 Codex 默认使用最高 CLI 权限，跳过审批并关闭 Codex 沙箱。
+
+Session 名称为 `ai-<目录名>-<规范绝对路径的哈希>`。因此，不同仓库中都叫 `auth` 的任务有不同会话；从同一 Worktree 的子目录启动会回到同一会话。复用前还会核对记录的项目目录及初始化状态，避免进入别的项目或半完成的工作区。
 
 ```bash
-dev /path/to/project --no-codex
-```
-
-指定 tmux Session 名称：
-
-```bash
-dev /path/to/project --session my-project
-```
-
-查看帮助：
-
-```bash
+dev --session my-project
+dev --detached
 dev --help
 ```
 
-同一个项目的默认 Session 名称为 `ai-<项目目录名>`。如果会话已经存在，再次运行 `dev` 只会 Attach 或切换到已有会话，不会重复创建窗口。
+`--session` 覆盖名称，但不会绕过目录归属检查。`--detached` 创建或检查会话后返回 Shell，不切换当前界面。已有会话会被复用；布局、启动、恢复等选项只在新建会话时生效，不会自动重启已有进程。模型和权限的新默认值只对新启动的 Codex 生效。
 
-### 默认窗口布局
+如果当前工作区是此前创建且未经改动的 focus 布局，显式恢复原版：
 
-| 编号 | Window 名称 | 默认内容 |
+```bash
+dev --restore-layout
+task open auth --restore-layout --detached
+```
+
+`--restore-layout` 选择 classic，核对会话属于当前目录、初始化完成且五窗口结构未被改动，保留所有已有窗格和进程，只补齐缺少的窗格。classic 会话无需转换；被改过的 focus 和 pair/full 会话会拒绝转换。已有 AI 保持原设置，新窗格使用本次配置，默认 deep；不带该参数时只连接原有布局。
+
+### 布局与 AI 分工
+
+| 布局 | AI 内容 | 适合的任务 |
 |---|---|---|
-| 1 | `codex` | 左右两个 Codex CLI |
-| 2 | `codex-claude` | 左侧 Codex CLI，右侧 Claude Code |
-| 3 | `backend-frontend` | 左侧后端目录，右侧前端目录 |
-| 4 | `services` | 项目服务；发现 Compose 文件时执行 `docker compose ps` |
-| 5 | `test` | 测试、Lint 和构建检查 Shell |
-| 6 | `git` | Git 仓库中自动启动 LazyGit |
-
-后端目录按以下顺序自动查找：
-
-```text
-backend → api → server → 项目根目录
-```
-
-前端目录按以下顺序自动查找：
-
-```text
-frontend → web → ui → 项目根目录
-```
-
-`--no-codex` 只禁止自动启动 Codex；如果已经安装 `claude`，`codex-claude` 的右侧 Pane 仍会启动 Claude Code。
-
-### AI CLI 权限警告
-
-`dev` 会在创建新 tmux Session 时读取 Codex 当前模型目录，选择优先级最高的可见模型，并使用该模型支持的最强推理档位。以当前解析结果为例，启动命令是：
+| `classic`（默认） | 三个 Codex + 一个普通模式 Claude | 原来的多 AI 工作台 |
+| `focus` | 一个 Codex 实现 Pane | 希望减少同时打开的 AI 时 |
+| `pair` | Codex 实现 + Claude Plan 模式审查 | 实现与方案/代码 Review |
+| `full` | Pair，再增加独立 Codex 探索窗口，同样使用最高 CLI 权限 | 需要独立代码探索的复杂任务 |
 
 ```bash
-codex --model gpt-6-astra --config model_reasoning_effort=ultra --config service_tier=fast --enable multi_agent --enable fast_mode --dangerously-bypass-approvals-and-sandbox
-claude --dangerously-skip-permissions
+dev --layout classic --profile deep
+dev --layout focus --profile standard
+dev --layout pair
+dev --layout full --profile deep
+dev --no-ai
+dev --layout pair --no-claude
+dev --layout pair --no-codex
 ```
 
-当前 Codex 模型目录会解析为能力最强的 `gpt-6-astra` 和 `ultra` 推理档位（最大推理并自动委派子代理）。如果以后出现新的最强模型，`dev` 会自动跟随，并从 Ultra、Max、Extra High 等该模型支持的档位中选择最高档；所选模型支持 Fast 时也会自动启用 `fast` 服务层。实时目录查询失败时，脚本会依次退回 CLI 内置目录和已知可用的 GPT-6 Astra + Ultra。Ultra 可能延长复杂任务的总处理时间，Fast 会加快模型输出；两者都会增加 Token/额度和并行任务用量。
+默认 classic 的六个窗口与原版一致，共九个窗格：
 
-Codex 目前没有稳定的 `latest-strongest` 模型别名，因此这里使用实验性的 `codex debug models` 目录及其优先级排序作为自动选择依据。OpenAI 可能在后续 CLI 中调整该实验性接口；脚本的两级回退可保证它仍能启动，但要让新模型正常可用，仍应及时更新 Codex CLI。
+| Window 名称 | 内容 |
+|---|---|
+| `codex` | 左右两个 Codex CLI |
+| `codex-claude` | 左侧 Codex，右侧普通模式 Claude |
+| `backend-frontend` | 左侧后端 Shell，右侧前端 Shell |
+| `services` | 服务 Shell |
+| `test` | 测试 Shell |
+| `git` | LazyGit；未安装时显示 Git 状态 |
 
-这两个参数都会绕过重要的安全边界：
+可选的 focus/pair/full 布局使用 `ai`、`app`、`services`、`test`、`git` 窗口；`app` 分为后端和前端，`full` 另有 `explore`。pair/full 中 Claude 审查 Pane 使用 `--permission-mode plan`。full 的 Codex 探索 Pane 与实现 Pane 一样跳过审批并关闭 Codex 沙箱，始终独立新建会话。多个独立实现任务应分别创建 Worktree。
 
-- Codex 的参数会跳过所有确认，并在没有 Codex 沙箱的情况下执行命令；它只适合已经由外部环境可靠隔离的场景。
-- Claude 的参数会绕过全部权限检查；官方只建议在没有网络访问等严格隔离的沙箱中使用。
+`--no-ai` 禁止自动启动所有 AI；`--no-codex` 和 `--no-claude` 分别禁用对应 CLI，Pane 保持普通 Shell。这些参数不会终止已经存在的 AI 会话。
 
-因此，“仓库可信”本身仍不足以消除风险。使用时还要确认运行环境、网络、凭据和可访问文件的范围，并避免让多个 AI Pane 同时编辑同一文件。
+### 普通与深度配置
 
-如需更严格的 Codex 确认流程，可以使用：
+默认 `deep` 在启动时尝试读取可见模型目录，选择高优先级模型及其最高支持推理档位；支持时启用 Fast，并启用 `multi_agent`。查询有超时限制，失败时退回 CLI 默认配置，不固定到某个未来可能失效的模型名称。目录优先级是选择规则，不是跨模型质量基准。可选的 `standard` 使用已有 Codex CLI 的模型与推理配置。
 
 ```bash
-dev /path/to/project --no-codex
+dev --profile standard
+dev --profile deep
 ```
 
-然后在 Codex Pane 中手动运行不带危险参数的命令：
+Deep 可能增加调用用量；需要沿用个人模型配置时显式选择 `--profile standard`。目录接口属于实验性接口，具体模型能力与可用参数取决于安装的 CLI。
+
+所有布局和配置档位中的 Codex 均默认添加 `--dangerously-bypass-approvals-and-sandbox`，跳过审批并关闭 Codex 沙箱，包括 full 的探索 Pane。`--unsafe` 仅额外为 classic 中的 Claude 启用权限绕过；pair/full 中的 Claude 保持 Plan 模式。
+
+### 预览、检查和恢复
 
 ```bash
-codex
+dev --plan
+dev --check
+dev --start
+dev --resume
 ```
 
-当前 `dev` 没有 `--no-claude` 选项，`--no-codex` 后 Claude 仍会带危险参数自动启动。若要使用普通权限模式，先在 `codex-claude` 右侧 Pane 中结束自动启动的 Claude，再手动运行不带危险参数的 `claude`。
+`--plan` 显示目录、会话、布局、端口和已配置命令，不启动工作区或项目命令。`--check` 检查项目配置、可执行命令和端口。`--start` 才会执行 `.ai-dev.conf` 中的后端、前端、服务与测试命令。
 
-另外，`--no-codex` 只在创建新 tmux Session 时影响启动流程。如果同名 Session 已存在，`dev` 会直接 Attach，参数不会停止其中已经运行的 Codex。需要严格模式时，应先检查现有 Session，或者用新的 Session 名创建工作区：
-
-```bash
-dev /path/to/project --session safe-project --no-codex
-```
+`--resume` 在新建工作区时打开 AI 的历史会话选择器；项目配置可选填写 `codex_session`、`claude_session` 指定会话。classic 只让第一个 Codex 恢复历史，另外两个 Codex 新开对话，避免并发使用同一会话 ID。已有 tmux Session 直接连接，不会再次打开选择器。tmux 重启后的布局恢复与 AI 对话恢复是两件事。
 
 ## 6. Codex CLI 与 Claude Code
 
@@ -442,101 +446,84 @@ claude --help
 
 ### 并行工作的原则
 
-默认 `dev` 中的多个 AI Pane 位于同一个工作目录，它们会立即看到彼此的文件修改。适合的用法包括：
+同一 Worktree 中的 AI Pane 会立即看到彼此的文件修改。classic 保留多个 AI Pane，需要自行明确分工；pair/full 则预设实现、审查和独立探索角色，Codex 探索 Pane 也拥有写入权限。适合的用法包括：
 
 - 一个 AI 实现，另一个 AI 只读 Review；
 - 一个处理后端，另一个处理前端，且文件范围不重叠；
 - 一个编写代码，另一个运行测试和分析日志。
 
-如果多个 AI 都要独立修改代码，优先使用 `newtask` 创建不同 Worktree，避免覆盖彼此的工作。
+如果多个 AI 都要独立修改代码，使用 `task new` 创建不同 Worktree，并明确各任务的交付范围。
 
-## 7. `newtask`：并行 Git Worktree
+## 7. `task` 与 `newtask`：任务生命周期
 
-Git Worktree 可以让同一个仓库同时存在多个工作目录，每个目录使用独立分支，但共享 Git 对象和历史。
+Git Worktree 让同一仓库同时拥有多个工作目录，各自使用独立分支，共享对象与历史。`task` 把创建、打开、查询和收尾串起来；`newtask` 仍可单独使用。
 
-### 创建任务
+### 创建并打开
 
-完整命令结构是：
-
-```text
-newtask <TASK_NAME> [BASE_REF]
+```bash
+task new auth
+git fetch origin
+task new billing origin/main --layout pair
+task new docs --no-open
 ```
 
-| 部分 | 全称 | 含义 |
-|---|---|---|
-| `TASK_NAME` | Task Name | 必填任务名；用于生成目录和 `feature/<任务名>` 分支 |
-| `BASE_REF` | Base Reference | 可选基准引用；方括号表示可省略，默认是 `HEAD` |
-| `auth` | authentication（示例助记） | 这里只是任务名示例，可以换成自己的任务名称 |
-| `origin/main` | remote/branch | 远程 `origin` 的 `main` 分支所对应的本地远程跟踪引用 |
+`task new NAME [BASE_REF]` 创建 `feature/NAME`，默认基于当前 `HEAD`，随后打开该 Worktree 的 `dev` 工作区。`--no-open` 只创建。`origin/main` 是本地远程跟踪引用，需要最新基线时先 Fetch。
 
-从当前提交创建：
+只创建目录时也可以使用：
 
 ```bash
 newtask auth
-```
-
-从指定基准分支创建：
-
-```bash
 newtask pipeline origin/main
+newtask --print-path sandbox
 ```
 
-`origin/main` 是本地保存的 Remote-tracking Ref（远程跟踪引用），`newtask` 不会自动 Fetch。若任务必须基于远程最新的 `main`，先运行：
+`--print-path` 只在标准输出中返回绝对路径。任务名只允许字母、数字、点、下划线和连字符，并须通过 Git 分支名称检查。
+
+目标路径已经存在，或分支已经在某个 Worktree 中检出时，命令会报错并提示如何继续；创建失败会尝试撤销本次创建且未被其他操作改变的分支。未检出的已有分支可以复用，但必须省略 `BASE_REF`，避免悄悄忽略指定基线。
+
+### 查找与切换
 
 ```bash
-git fetch origin
-newtask pipeline origin/main
+task list
+task pick
+task open auth
+task open auth --resume
 ```
 
-命令会创建：
+`list` 显示任务、分支、工作区修改状态、关联 tmux Session 与目录。`open` 按 Git 实际登记的分支查找，旧目录结构无需搬迁。`pick` 在交互终端使用可选的 fzf；没有 fzf 时用编号选择，没有终端时只输出列表。tmux 中可以按 `Ctrl+a t` 打开选择器。
 
-```text
-分支：feature/<任务名>
-目录：<主仓库>_worktrees/<任务名>
-```
+`task new/open/pick` 可传递 `dev` 的布局、配置、恢复、启动与禁用 AI 等选项，也可用 `--` 分隔。`task new` 总会先创建 Worktree；若只想预览已有目录，使用 `dev --plan` 或 `task open NAME --plan`。
 
-然后启动该 Worktree：
+### Worktree 目录
+
+默认目录仍为主仓库旁的 `<主仓库>_worktrees/<任务名>`。自定义共享目录：
 
 ```bash
-dev /path/to/repository_worktrees/auth
+AI_WORKTREE_ROOT=/path/to/worktrees task new auth
 ```
 
-任务名只能包含字母、数字、点、下划线和连字符。
+使用全局根目录时，实际路径为 `<根目录>/<仓库名-路径哈希>/<任务名>`，不同项目可以使用相同任务名。相对根目录以调用命令时的目录解析，输出始终为绝对路径。从已有 Worktree 创建任务时，仓库标识仍来自主仓库。
 
-### 自定义 Worktree 根目录
-
-临时指定：
+### 预览和完成任务
 
 ```bash
-AI_WORKTREE_ROOT=/path/to/worktrees newtask auth
+task done auth
+task done auth --apply
+task done auth --base origin/main --keep-branch
 ```
 
-长期指定时，把下面这一行加入 `~/.zshrc`：
+`done` 默认只预览。只有 `--apply` 才尝试删除已登记的关联 Worktree。应用前必须同时满足：
 
-```bash
-export AI_WORKTREE_ROOT=/path/to/worktrees
-```
+- 工作区没有未提交或未跟踪内容。
+- 任务分支已合并到指定 `--base`；未指定时使用主 Worktree 的当前 `HEAD`。
+- 有本地远程跟踪引用包含任务提交；若缺失，可先 Fetch。
+- 没有关联的 tmux Session，且不是主 Worktree。
 
-然后运行 `source ~/.zshrc` 或打开新的 Ghostty 窗口。单独在当前终端执行 `export` 只持续到当前 Shell 结束，但会传递给它启动的子进程。
+忽略文件也会被 Git 删除，因此存在 `.env` 等忽略文件时默认阻止清理。`--allow-ignored` 明确允许删除这些文件；`--allow-unpushed` 明确跳过远程包含检查。两者都不会跳过未提交内容和合并检查。
 
-### 查看和清理 Worktree
+`--keep-branch` 保留分支，其他检查照常执行。不带它时使用 Git 的安全分支删除；若 Git 因其上游/当前分支规则拒绝，Worktree 已移除而分支会保留，并输出说明。命令不会强制删除锁定 Worktree、未合并分支，也不会自动结束 tmux 进程。
 
-查看：
-
-```bash
-git worktree list
-```
-
-确认工作已经提交后移除：
-
-```bash
-git worktree remove /exact/path/to/worktree
-git branch -d feature/auth
-```
-
-`-d` 对应 `--delete`，只删除已经安全合并的分支；大写 `-D` 会强制删除，不适合作为日常默认操作。
-
-如果 Worktree 中还有未提交修改，Git 通常会拒绝移除。一次 `git worktree remove --force <path>` 可以强制移除有修改或含 Submodule 的 Worktree；锁定的 Worktree 需要连续写两次 `--force --force`；主 Worktree 永远不能用该命令移除。强制操作可能丢失工作，不要把它当作日常默认操作。
+原生查看、修复、移动等命令仍见 [命令查询手册](command-reference.md#9-tasknewtask-与-git-worktree)。完整参数以 `task help` 为准。
 
 ## 8. Git 工具
 
@@ -594,7 +581,24 @@ gh run view --log-failed
 
 ## 9. 后端、前端、服务与测试窗口
 
-`dev` 只创建标准工作目录和窗口，不会猜测并自动启动项目命令。应根据具体项目在对应 Pane 中运行命令。
+默认只创建窗口；项目命令需要写入 `.ai-dev.conf`，再使用 `dev --start` 执行。可以参考 [项目配置模板](../config/project.example.conf)，按自己的目录修改，例如：
+
+```ini
+layout=classic
+profile=deep
+backend_dir=backend
+frontend_dir=frontend
+backend_cmd=uv run uvicorn app.main:app --reload --port "$BACKEND_PORT"
+frontend_cmd=pnpm dev --port "$FRONTEND_PORT"
+test_cmd=git diff --check
+services_cmd=docker compose up
+```
+
+配置按字面 `key=value` 读取，不是 Shell 脚本：不要添加 `export`，不要给整个值包一层引号，只使用独立整行注释。命令值本身可以包含正常的 Shell 引号；这些命令仅在显式 `--start` 时执行。
+
+每个 Worktree 按规范绝对路径生成默认 `BACKEND_PORT`、`FRONTEND_PORT` 和 `COMPOSE_PROJECT_NAME`。应用命令需要实际使用这些变量；固定端口、固定 Compose 容器名或共享数据卷不会因创建 Worktree 自动隔离。端口占用时，调整配置中的 `backend_port`、`frontend_port`，再运行 `dev --check`。
+
+未指定目录时，后端按 `backend → api → server → 项目根目录` 查找，前端按 `frontend → web → ui → 项目根目录` 查找。依赖安装、未跟踪的本地环境文件仍需按项目说明准备。以下是手动启动的常见命令。
 
 ### Backend Pane 示例
 
@@ -651,60 +655,61 @@ pnpm build
 
 ## 10. 推荐日常工作流
 
-### 单任务开发
+### 从任务到交付
 
 ```bash
 cd /path/to/project
-dev
+git fetch origin
+task new auth origin/main
 ```
 
-1. 在 `codex` 或 `codex-claude` Window 中实现功能。
-2. 在 `backend-frontend` Window 中运行应用。
-3. 在 `services` Window 中观察 Docker 服务。
-4. 在 `test` Window 中运行测试和 Lint。
-5. 在 `git` Window 中使用 LazyGit 检查、提交和 Push。
-6. 使用 `gh pr create --fill` 创建 PR。
-7. 使用 `gh pr checks --watch` 等待 CI。
+在 `codex` 与 `codex-claude` 窗口安排实现和审查，在 `backend-frontend` 窗口运行应用，在 `test` 窗口执行测试和 Lint。已配置项目启动命令时，可在新建任务时追加 `--start`。
 
-### 多任务并行开发
+交付前检查修改并提交：
 
 ```bash
-cd /path/to/project
-newtask auth origin/main
-newtask billing origin/main
-dev /path/to/project_worktrees/auth
+git status --short --branch
+git diff
+git diff --staged
+lazygit
 ```
 
-为另一个 Worktree 再运行一次 `dev`。每个 Worktree 会获得独立分支、目录和项目级 tmux Session。
-
-### 离开和恢复
-
-临时离开但保留进程：
-
-```text
-Ctrl+a d
-```
-
-恢复：
+确认要推送和创建 PR 后，按项目流程运行：
 
 ```bash
-dev /path/to/project
+git push -u origin HEAD
+gh pr create --fill
+gh pr checks --watch
 ```
 
-如果 macOS 或 tmux 已经重启，可以尝试：
+本工具不会代替用户自动执行这些远程操作。PR 完成后，保存工作、结束对应 tmux Session，再从主仓库 Fetch 并预览清理：
 
-```text
-Ctrl+a Ctrl+r
+```bash
+git fetch origin
+task done auth --base origin/main
 ```
 
-布局恢复后，按需重新启动 Codex、Claude、开发服务器或日志命令。
+确认预览内容后，用同样参数追加 `--apply`。Squash Merge 不一定保留祖先关系，此时安全合并检查可能拒绝删除；不要把强制删除当作默认收尾方式。
+
+### 多任务与恢复
+
+```bash
+task new billing origin/main --no-open
+task list
+task pick
+task open billing
+```
+
+临时离开使用 `Ctrl+a d`，保留 Session 及进程。再次运行 `task open NAME` 连接回去。
+
+macOS 或 tmux 重启后，可用 `Ctrl+a Ctrl+r` 恢复插件保存的布局。创建新会话并恢复 AI 历史时，使用 `task open NAME --resume`；若布局已恢复且 Session 仍存在，在对应 Pane 中手动运行 `codex resume` 或 `claude --resume`。
 
 ## 11. 卸载与恢复原配置
 
-运行：
+在本工具的仓库根目录运行：
 
 ```bash
-/Users/renyakun/work26/ai-dev-env-v1.0/uninstall.sh
+./uninstall.sh
 ```
 
 卸载脚本会根据安装时记录的文件指纹恢复 Ghostty、tmux、Shell 和辅助命令配置。如果某个受管理文件在安装后被手动修改，脚本会保留它，避免覆盖用户改动。
@@ -719,12 +724,13 @@ Ctrl+a Ctrl+r
 
 ## 12. 常见问题
 
-### 找不到 `dev`、`newtask` 或 `ai-dev-doctor`
+### 找不到 `dev`、`newtask`、`task` 或 `ai-dev-doctor`
 
 ```bash
 source ~/.zshrc
 command -v dev
 command -v newtask
+command -v task
 command -v ai-dev-doctor
 ```
 
@@ -743,7 +749,7 @@ tmux show-options -sqv terminal-features
 
 ### `dev` 没有重新创建窗口
 
-同名 Session 已存在时，`dev` 会直接 Attach。先查看：
+属于同一目录且初始化完成的 Session 已存在时，`dev` 会直接连接；布局和启动选项不会重建窗口。先查看：
 
 ```bash
 tmux list-sessions
@@ -773,22 +779,14 @@ command -v lazygit
 lazygit
 ```
 
-### Docker Window 只显示 Shell
+### Services 窗口只显示 Shell
 
-只有项目根目录存在以下文件之一时，`dev` 才会自动运行 `docker compose ps`：
-
-```text
-compose.yml
-compose.yaml
-docker-compose.yml
-docker-compose.yaml
-```
-
-同时确认 Docker Desktop 已经启动：
+默认不会自动启动 Docker 或项目服务。先在 `.ai-dev.conf` 设置 `services_cmd`，再用 `dev --start` 创建新工作区；已有 Session 中按需手动执行命令。确认 Docker 可用：
 
 ```bash
 docker info
 docker compose ps
+dev --check
 ```
 
 ### 一键诊断
@@ -875,7 +873,13 @@ ai-dev-doctor
 | `tmux show-options` | `-v` | Value | 只输出选项值 |
 | `tmux show-options` | `-s` | Server | 读取服务器级选项 |
 | `dev` | `--session` | Session | 指定 tmux Session 名称 |
-| `dev` | `--no-codex` | No Codex | 不自动启动 Codex Pane |
+| `dev` | `--no-ai` | No AI | 新会话不启动 AI |
+| `dev` | `--no-codex` / `--no-claude` | No Codex / No Claude | 分别禁用对应 CLI |
+| `dev` | `--layout` / `--profile` | Layout / Profile | 选择窗口布局与模型配置 |
+| `dev` | `--plan` / `--check` | Plan / Check | 预览启动方案或检查项目配置 |
+| `dev` | `--start` / `--resume` | Start / Resume | 执行配置的项目命令或恢复 AI 历史 |
+| `dev` | `--restore-layout` | Restore Layout | 保留原窗格与进程，将未改动的 focus 会话恢复为 classic |
+| `task done` | `--apply` | Apply | 通过检查后执行预览的清理 |
 | Codex | `--dangerously-bypass-approvals-and-sandbox` | Bypass Approvals and Sandbox | 跳过全部确认且不使用 Codex 沙箱；只适合外部已可靠隔离的环境 |
 | Claude | `--dangerously-skip-permissions` | Skip Permissions | 绕过全部权限检查；只适合无网络等严格隔离的沙箱 |
 | Docker | `-d`、`--detach` | Detached | 在后台启动容器，不占住当前终端 |

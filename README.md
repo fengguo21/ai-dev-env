@@ -1,6 +1,6 @@
 # AI Dev Environment for macOS v1.2
 
-Ghostty + tmux + Git worktree 工作台。用一个入口创建任务、切换工作区、启动项目、检查环境和收尾；默认以一个 AI 窗格开始，按需选择协作布局。
+Ghostty + tmux + Git worktree 工作台。用一个入口创建任务、切换工作区、启动项目、检查环境和收尾；默认保留原来的六窗口、九窗格布局，以及三个 Codex + 一个 Claude 的工作方式。
 
 ## 安装与升级
 
@@ -41,7 +41,7 @@ task open auth --resume
 task 命令在对应 Git 仓库或其 worktree 内运行。task new 默认从当前 HEAD 创建 feature/auth 和独立 worktree，然后打开工作区；只创建不打开时加 --no-open。远程基准不会自动更新，需要时先 git fetch，再指定 origin/main。
 
 ~~~bash
-task new auth origin/main --layout pair
+task new auth origin/main
 task new billing --no-open
 task open billing --start
 ~~~
@@ -62,37 +62,61 @@ AI_WORKTREE_ROOT=/path/to/worktrees newtask search
 
 | 选项 | 行为 |
 |---|---|
-| --layout focus | 默认：一个实现窗格，另有 app、services、test、git 窗口 |
+| --layout classic | 默认：原来的 codex、codex-claude、backend-frontend、services、test、git 六窗口 |
+| --layout focus | 可选：一个实现窗格，另有 app、services、test、git 窗口 |
 | --layout pair | 实现与 Claude plan 模式审查并排 |
-| --layout full | pair 基础上增加独立 Codex read-only 探索窗口 |
-| --profile standard | 默认：尊重 Codex CLI 自身的模型和推理配置 |
-| --profile deep | 按当前 CLI 模型目录的可见优先级及支持档位选择；保留原最强档工作流 |
+| --layout full | pair 基础上增加独立 Codex 探索窗口，同样使用最高 CLI 权限 |
+| --profile standard | 可选：尊重 Codex CLI 自身的模型和推理配置 |
+| --profile deep | 默认：按当前 CLI 模型目录的可见优先级选择模型及最高支持推理档位 |
 | --no-ai | 所有 AI 窗格留在 Shell |
 | --no-codex / --no-claude | 禁用对应 CLI 的自动启动 |
 | --resume | 新工作区打开 AI 历史选择器，或恢复配置中指定的会话 ID |
-| --unsafe | 仅显式启用时，为实现用 Codex 加权限绕过参数 |
+| --restore-layout | 把未改动的 focus 会话恢复为 classic，保留所有已有窗格和进程 |
+| --unsafe | 额外为 classic 中的 Claude 启用权限绕过；pair/full 的 Claude 保持 plan 模式 |
 | --detached | 创建但不附着，适合自动化 |
 
 ~~~bash
+dev
+dev --layout classic --profile deep
+dev --layout focus --profile standard
 dev --layout pair
-dev --profile deep
 dev --layout full --profile deep
 dev --no-ai
 ~~~
 
-deep 沿用实验性 codex debug models 接口：实时查询最多约 5 秒，随后尝试 CLI 内置目录；失败时使用 CLI 默认配置，不再硬编码可能不可用的模型。目录优先级只是选择规则，不是跨模型质量基准。支持 Fast 时可以启用；codex_model、codex_effort、codex_fast 可在项目配置中覆盖。
+默认 classic 布局如下，共六个窗口、九个窗格：
 
-默认不添加权限绕过参数，实际权限遵循 CLI 配置。Claude 的 plan 模式是协作约定的一部分；独立写代码的任务仍应使用不同 worktree。full 的探索会话不复用实现会话 ID。
+| 窗口 | 内容 |
+|---|---|
+| codex | 左右两个 Codex |
+| codex-claude | 左侧 Codex，右侧普通模式 Claude |
+| backend-frontend | 左侧后端 Shell，右侧前端 Shell |
+| services | 服务 Shell |
+| test | 测试 Shell |
+| git | LazyGit，未安装时显示 Git 状态 |
 
-已有 tmux 会话只重新连接，不会因 --start、--resume 或布局参数重复启动进程。tmux 恢复布局不等于恢复 AI 对话；--resume 不使用 --last 猜测会话。需要精确恢复可配置 codex_session / claude_session。旧版未记录目录身份的会话不会自动接管，可先从 Ctrl+a s 找回旧会话，或指定新的 --session 名称。
+deep 沿用实验性 codex debug models 接口：实时查询最多约 5 秒，随后尝试 CLI 内置目录；失败时使用 CLI 默认配置，不再硬编码可能不可用的模型。目录优先级只是选择规则，不是跨模型质量基准。默认选择最高支持推理档位、支持时启用 Fast，并启用 multi_agent；codex_model、codex_effort、codex_fast 可在项目配置中覆盖。
+
+所有布局中的 Codex 默认添加 --dangerously-bypass-approvals-and-sandbox，以最高 CLI 权限启动：跳过审批并关闭 Codex 沙箱，包括 full 的探索窗口。classic 中 Claude 使用普通模式；可选 pair/full 布局中的 Claude 使用 plan 模式。独立写代码的任务仍应使用不同 worktree。full 的探索会话独立新建，不复用实现会话 ID。
+
+已有 tmux 会话通常只重新连接，不会因 --start、--resume 或布局参数重复启动进程；更新后的模型和权限默认值只对新启动的 Codex 生效。要把此前创建的 focus 工作区恢复为原版，运行：
+
+~~~bash
+dev --restore-layout
+task open auth --restore-layout --detached
+~~~
+
+恢复会核对目录归属、初始化状态以及原有五窗口结构，保留所有已有窗格和进程，只补齐 classic 缺少的窗格。已经是 classic 时无需转换；被修改过的 focus 或 pair/full 会话会拒绝转换。已有 AI 保持原设置，新增加的 AI 窗格使用本次配置，默认 deep。
+
+tmux 恢复布局不等于恢复 AI 对话；--resume 不使用 --last 猜测会话。需要精确恢复可配置 codex_session / claude_session。classic 中只有第一个 Codex 使用恢复选择器或配置的会话 ID，另两个新开对话，避免同时写入同一段历史。旧版未记录目录身份的会话不会自动接管，可先从 Ctrl+a s 找回旧会话，或指定新的 --session 名称。
 
 ## 项目配置与启动
 
 将 [配置示例](config/project.example.conf) 复制为项目根目录的 .ai-dev.conf，并按真实项目调整。它是纯 key=value 数据：不写 export、不在整个值外加引号，只支持整行注释，不执行 source 或 eval。
 
 ~~~ini
-layout=pair
-profile=standard
+layout=classic
+profile=deep
 backend_dir=backend
 frontend_dir=frontend
 backend_cmd=uv run uvicorn app.main:app --reload --port "$BACKEND_PORT"

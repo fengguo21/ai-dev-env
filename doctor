@@ -1,125 +1,174 @@
 #!/usr/bin/env bash
-set -u
+set -uo pipefail
 
+AI_DEV_HOME="${AI_DEV_HOME:-$HOME}"
 PASS_COUNT=0
+WARN_COUNT=0
 FAIL_COUNT=0
-
-pass() {
-  PASS_COUNT=$((PASS_COUNT + 1))
-  printf 'PASS  %s\n' "$*"
+PROJECT_DIR=""
+CHECK_AUTH=1
+VERIFY_CONFIG=""
+VERIFY_LOCAL_CONFIG=""
+VERIFY_SOCKET="ai-dev-doctor-$$"
+VERIFY_STARTED=0
+pass() { PASS_COUNT=$((PASS_COUNT + 1)); printf 'PASS  %s\n' "$*"; }
+warn() { WARN_COUNT=$((WARN_COUNT + 1)); printf 'WARN  %s\n' "$*"; }
+fail() { FAIL_COUNT=$((FAIL_COUNT + 1)); printf 'FAIL  %s\n' "$*"; }
+info() { printf 'INFO  %s\n' "$*"; }
+usage() {
+  printf '%s\n' 'Usage: ai-dev-doctor [--project PATH] [--skip-auth]' \
+    'Required failures return nonzero; missing optional tools are warnings.' \
+    'Authentication probes are quiet, bounded, and do not launch AI tasks.'
 }
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --project)
+      [ "$#" -ge 2 ] || { usage >&2; exit 1; }
+      PROJECT_DIR="$2"; shift 2 ;;
+    --skip-auth) CHECK_AUTH=0; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) printf 'Unknown option: %s\n' "$1" >&2; usage >&2; exit 1 ;;
+  esac
+done
+case "$AI_DEV_HOME" in /*) ;; *) fail 'AI_DEV_HOME must be an absolute path.'; exit 1 ;; esac
+AI_DEV_HOME="${AI_DEV_HOME%/}"
+[ -n "$AI_DEV_HOME" ] || { fail 'AI_DEV_HOME cannot be the filesystem root.'; exit 1; }
+# A test/provisioning destination must never inspect the real account credentials.
+[ "$AI_DEV_HOME" = "$HOME" ] || CHECK_AUTH=0
 
-fail() {
-  FAIL_COUNT=$((FAIL_COUNT + 1))
-  printf 'FAIL  %s\n' "$*"
+cleanup() {
+  local status=$?
+  trap - EXIT INT TERM
+  if [ "$VERIFY_STARTED" -eq 1 ]; then tmux -L "$VERIFY_SOCKET" kill-server >/dev/null 2>&1 || true; fi
+  if [ -n "$VERIFY_CONFIG" ]; then rm -f "$VERIFY_CONFIG"; fi
+  if [ -n "$VERIFY_LOCAL_CONFIG" ]; then rm -f "$VERIFY_LOCAL_CONFIG"; fi
+  exit "$status"
 }
-
-info() {
-  printf 'INFO  %s\n' "$*"
-}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 find_ghostty() {
-  if command -v ghostty >/dev/null 2>&1; then
-    command -v ghostty
+  if command -v ghostty >/dev/null 2>&1; then command -v ghostty
   elif [ -x /Applications/Ghostty.app/Contents/MacOS/ghostty ]; then
     printf '%s\n' /Applications/Ghostty.app/Contents/MacOS/ghostty
-  elif [ -x "${HOME}/Applications/Ghostty.app/Contents/MacOS/ghostty" ]; then
-    printf '%s\n' "${HOME}/Applications/Ghostty.app/Contents/MacOS/ghostty"
-  else
-    return 1
-  fi
+  elif [ -x "$AI_DEV_HOME/Applications/Ghostty.app/Contents/MacOS/ghostty" ]; then
+    printf '%s\n' "$AI_DEV_HOME/Applications/Ghostty.app/Contents/MacOS/ghostty"
+  else return 1; fi
 }
-
 validate_tmux_config() {
-  local socket_name="ai-dev-doctor-$$"
-  local verify_config
-  verify_config="$(mktemp "${TMPDIR:-/tmp}/ai-dev-doctor-tmux.XXXXXX")" || return 1
-  sed '/^[[:space:]]*run-shell.*tpm\/tpm/d' "${HOME}/.tmux.conf" > "$verify_config"
-
-  if ! tmux -L "$socket_name" -f "$verify_config" new-session -d -s validate; then
-    rm -f "$verify_config"
-    return 1
+  VERIFY_CONFIG="$(mktemp "${TMPDIR:-/tmp}/ai-dev-doctor-tmux.XXXXXX")" || return 1
+  sed -e '/^[[:space:]]*run-shell.*tpm\/tpm/d' \
+    -e '/^[[:space:]]*source\(-file\)\{0,1\}.*\.tmux\.local\.conf/d' \
+    "$AI_DEV_HOME/.tmux.conf" > "$VERIFY_CONFIG" || return 1
+  VERIFY_STARTED=1
+  tmux -L "$VERIFY_SOCKET" -f /dev/null new-session -d -s validate 'exec /bin/sleep 60' || return 1
+  # Loading a bad config during new-session can still return 0. Explicitly
+  # sourcing after startup propagates syntax and unsupported-option failures.
+  tmux -L "$VERIFY_SOCKET" source-file "$VERIFY_CONFIG" || return 1
+  if [ -f "$AI_DEV_HOME/.tmux.local.conf" ]; then
+    VERIFY_LOCAL_CONFIG="$(mktemp "${TMPDIR:-/tmp}/ai-dev-doctor-local.XXXXXX")" || return 1
+    sed '/^[[:space:]]*run-shell.*tpm\/tpm/d' "$AI_DEV_HOME/.tmux.local.conf" > "$VERIFY_LOCAL_CONFIG" || return 1
+    tmux -L "$VERIFY_SOCKET" source-file "$VERIFY_LOCAL_CONFIG" || return 1
   fi
-
-  tmux -L "$socket_name" kill-server >/dev/null 2>&1 || true
-  rm -f "$verify_config"
+  tmux -L "$VERIFY_SOCKET" kill-server >/dev/null 2>&1 || true
+  VERIFY_STARTED=0
+}
+quiet_probe() {
+  local probe_pid tick
+  "$@" >/dev/null 2>&1 &
+  probe_pid=$!
+  for ((tick=0; tick<30; tick++)); do
+    if ! kill -0 "$probe_pid" 2>/dev/null; then wait "$probe_pid"; return $?; fi
+    sleep 0.1
+  done
+  kill "$probe_pid" 2>/dev/null || true
+  kill -KILL "$probe_pid" 2>/dev/null || true
+  wait "$probe_pid" 2>/dev/null || true
+  return 124
+}
+check_version() {
+  local command_name="$1" version_arg="$2" required="$3" remedy="$4" output
+  if command -v "$command_name" >/dev/null 2>&1 && output="$("$command_name" "$version_arg" 2>/dev/null)"; then
+    pass "${output%%$'\n'*}"
+  elif [ "$required" = required ]; then fail "$command_name is unavailable; $remedy"
+  else warn "Optional $command_name is unavailable; $remedy"; fi
 }
 
-printf 'AI Dev Environment v1.1 doctor\n\n'
+printf 'AI Dev Environment v1.2 doctor\n\n'
+GHOSTTY_BIN="$(find_ghostty || true)"
+if [ -n "$GHOSTTY_BIN" ] && version_output="$("$GHOSTTY_BIN" +version 2>/dev/null)"; then
+  pass "${version_output%%$'\n'*}"
+else fail 'Ghostty is unavailable; run brew install --cask ghostty'; fi
+check_version tmux -V required 'run brew install tmux'
+check_version git --version required 'run brew install git'
+check_version lazygit --version optional 'run brew install lazygit'
+check_version delta --version optional 'run brew install git-delta'
+check_version gh --version optional 'run brew install gh'
+check_version fzf --version optional 'run brew install fzf (task picking also has a text fallback)'
+check_version codex --version optional 'install Codex CLI to use Codex panes'
+check_version claude --version optional 'install Claude Code to use Claude panes'
 
-if GHOSTTY_BIN="$(find_ghostty)"; then
-  pass "$("$GHOSTTY_BIN" +version | head -1)"
-else
-  fail 'Ghostty is not installed'
-  GHOSTTY_BIN=""
-fi
-
-if command -v tmux >/dev/null 2>&1; then
-  pass "$(tmux -V)"
-else
-  fail 'tmux is not installed'
-fi
-
-if command -v git >/dev/null 2>&1; then
-  pass "$(git --version)"
-else
-  fail 'git is not installed'
-fi
-
-for git_tool in lazygit delta gh; do
-  if command -v "$git_tool" >/dev/null 2>&1; then
-    pass "Git tool installed: ${git_tool}"
-  else
-    fail "Git tool missing: ${git_tool}"
-  fi
-done
-
-if [ -n "$GHOSTTY_BIN" ] && [ -f "${HOME}/.config/ghostty/config" ] && \
-   "$GHOSTTY_BIN" +validate-config --config-file="${HOME}/.config/ghostty/config"; then
-  pass 'Ghostty configuration is valid'
-else
-  fail 'Ghostty configuration is missing or invalid'
-fi
-
-if [ -n "$GHOSTTY_BIN" ] && "$GHOSTTY_BIN" +list-fonts | \
-   grep -Fq 'JetBrainsMono Nerd Font Mono'; then
+if [ -n "$GHOSTTY_BIN" ] && [ -f "$AI_DEV_HOME/.config/ghostty/config" ] && \
+   "$GHOSTTY_BIN" +validate-config --config-file="$AI_DEV_HOME/.config/ghostty/config"; then
+  pass 'Ghostty configuration and local overrides are valid'
+else fail 'Ghostty configuration is missing or invalid; fix the errors above or rerun install.sh'; fi
+if [ -n "$GHOSTTY_BIN" ] && font_output="$("$GHOSTTY_BIN" +list-fonts 2>/dev/null)" && \
+   printf '%s\n' "$font_output" | grep -F 'JetBrainsMono Nerd Font Mono' >/dev/null; then
   pass 'JetBrainsMono Nerd Font Mono is available'
-else
-  fail 'JetBrainsMono Nerd Font Mono is unavailable'
-fi
-
-if [ -n "$GHOSTTY_BIN" ] && "$GHOSTTY_BIN" +list-themes | \
-   grep -Fq 'TokyoNight Night'; then
+else warn 'Nerd Font missing; run brew install --cask font-jetbrains-mono-nerd-font'; fi
+if [ -n "$GHOSTTY_BIN" ] && theme_output="$("$GHOSTTY_BIN" +list-themes 2>/dev/null)" && \
+   printf '%s\n' "$theme_output" | grep -F 'TokyoNight Night' >/dev/null; then
   pass 'TokyoNight Night theme is available'
-else
-  fail 'TokyoNight Night theme is unavailable'
-fi
-
-if command -v tmux >/dev/null 2>&1 && [ -f "${HOME}/.tmux.conf" ] && validate_tmux_config; then
-  pass 'tmux configuration is valid'
-else
-  fail 'tmux configuration is missing or invalid'
-fi
+else warn 'TokyoNight Night theme is unavailable; update Ghostty or select another theme in config.local'; fi
+if command -v tmux >/dev/null 2>&1 && [ -f "$AI_DEV_HOME/.tmux.conf" ] && validate_tmux_config; then
+  pass 'tmux configuration and local overrides are valid'
+else fail 'tmux configuration is missing or invalid; fix the errors above or rerun install.sh'; fi
 
 for plugin_name in tpm tmux-resurrect tmux-continuum tmux-yank; do
-  if [ -d "${HOME}/.tmux/plugins/${plugin_name}" ]; then
-    pass "tmux plugin installed: ${plugin_name}"
-  else
-    fail "tmux plugin missing: ${plugin_name}"
-  fi
+  if [ -d "$AI_DEV_HOME/.tmux/plugins/$plugin_name/.git" ]; then pass "tmux plugin installed: $plugin_name"
+  else warn "Optional tmux plugin missing: $plugin_name; rerun install.sh or press Ctrl+a I"; fi
 done
+for helper in dev newtask task; do
+  if [ ! -x "$AI_DEV_HOME/.local/bin/$helper" ]; then
+    fail "$helper is not installed; rerun install.sh"
+  elif [ "$AI_DEV_HOME" = "$HOME" ] && [ "$(command -v "$helper" 2>/dev/null || true)" != "$AI_DEV_HOME/.local/bin/$helper" ]; then
+    warn "$helper is installed but not selected on PATH; open a new Ghostty window and check command -v $helper"
+  else pass "Helper installed: $helper"; fi
+done
+if [ -r "$AI_DEV_HOME/.local/share/ai-dev-env/common.sh" ]; then pass 'Shared helper library is installed'
+else fail 'Shared helper library is missing; rerun install.sh'; fi
 
-if command -v dev >/dev/null 2>&1 && command -v newtask >/dev/null 2>&1; then
-  pass 'dev and newtask are on PATH'
-else
-  fail 'dev or newtask is not on PATH; restart Ghostty after installation'
+if command -v delta >/dev/null 2>&1; then
+  pager="$(git config --get core.pager 2>/dev/null || true)"
+  case "$pager" in *delta*) pass 'Git uses Delta for diffs' ;;
+    *) warn 'Delta is installed but not the Git pager; try git -c core.pager=delta diff' ;; esac
 fi
+if [ "$CHECK_AUTH" -eq 1 ]; then
+  if command -v codex >/dev/null 2>&1; then
+    if quiet_probe codex login status; then pass 'Codex login is available'
+    else warn 'Codex login could not be confirmed; run codex login status or codex login'; fi
+  fi
+  if command -v claude >/dev/null 2>&1; then
+    if quiet_probe claude auth status; then pass 'Claude authentication is available'
+    else warn 'Claude authentication could not be confirmed; run claude auth status or claude auth login'; fi
+  fi
+  if command -v gh >/dev/null 2>&1; then
+    if quiet_probe gh auth status; then pass 'GitHub authentication is available'
+    else warn 'GitHub authentication could not be confirmed; run gh auth status or gh auth login'; fi
+  fi
+else info 'Authentication checks skipped'; fi
 
+if [ -n "$PROJECT_DIR" ]; then
+  if [ -x "$AI_DEV_HOME/.local/bin/dev" ]; then
+    if "$AI_DEV_HOME/.local/bin/dev" --check "$PROJECT_DIR"; then pass "Project is ready: $PROJECT_DIR"
+    else fail "Project readiness failed: $PROJECT_DIR"; fi
+  else fail 'Cannot check the project until dev is installed'; fi
+else info 'Run ai-dev-doctor --project /path/to/project to check project commands and ports'; fi
 if [ -n "${TMUX:-}" ]; then
   info "Current terminal: TERM=${TERM:-unknown}, inside tmux"
 else
   info "Current terminal: TERM=${TERM:-unknown}, outside tmux"
 fi
-
-printf '\nResult: %d passed, %d failed\n' "$PASS_COUNT" "$FAIL_COUNT"
+printf '\nResult: %d passed, %d warnings, %d failed\n' "$PASS_COUNT" "$WARN_COUNT" "$FAIL_COUNT"
 [ "$FAIL_COUNT" -eq 0 ]

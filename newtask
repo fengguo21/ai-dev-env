@@ -1,54 +1,117 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+SCRIPT_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+COMMON_PATH="$SCRIPT_ROOT/lib/common.sh"
+if [ ! -r "$COMMON_PATH" ]; then
+  COMMON_PATH="${AI_DEV_HOME:-$HOME}/.local/share/ai-dev-env/common.sh"
+fi
+if [ ! -r "$COMMON_PATH" ]; then
+  printf 'newtask: shared helpers are missing; rerun install.sh\n' >&2
+  exit 1
+fi
+source "$COMMON_PATH"
+
+usage() {
+  printf '%s\n' 'Usage: newtask [--print-path] TASK_NAME [BASE_REF]' \
+    'Create feature/TASK_NAME from BASE_REF (default: HEAD).' \
+    'An existing, unchecked-out branch can be reused when BASE_REF is omitted.' \
+    'AI_WORKTREE_ROOT is resolved from the calling directory and grouped by repository.' \
+    '--print-path  Print only the absolute worktree path on stdout.'
+}
+
+PRINT_PATH=false
+case "${1:-}" in
+  --help|-h) usage; exit 0 ;;
+  --print-path) PRINT_PATH=true; shift ;;
+esac
 if [ "$#" -lt 1 ] || [ "$#" -gt 2 ]; then
-  printf 'Usage: newtask TASK_NAME [BASE_REF]\n' >&2
-  printf 'Example: newtask auth HEAD\n' >&2
+  usage >&2
   exit 2
 fi
-
 TASK_NAME="$1"
 BASE_REF="${2:-HEAD}"
-
+BASE_EXPLICIT=false
+[ "$#" -ne 2 ] || BASE_EXPLICIT=true
 case "$TASK_NAME" in
   *[!A-Za-z0-9._-]*|'')
     printf 'newtask: task names may contain only letters, numbers, ., _ and -\n' >&2
-    exit 2
-    ;;
+    exit 2 ;;
 esac
-
-command -v git >/dev/null 2>&1 || {
-  printf 'newtask: git is not installed\n' >&2
-  exit 1
-}
-
+command -v git >/dev/null 2>&1 || { printf 'newtask: git is not installed\n' >&2; exit 1; }
 REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || {
   printf 'newtask: run this command inside a Git repository\n' >&2
   exit 1
 }
-
-git rev-parse --verify "${BASE_REF}^{commit}" >/dev/null 2>&1 || {
+PRIMARY_ROOT="$(ai_repo_primary "$REPO_ROOT")"
+BRANCH_NAME="feature/${TASK_NAME}"
+git check-ref-format --branch "$BRANCH_NAME" >/dev/null || exit 2
+BASE_COMMIT="$(git rev-parse --verify --end-of-options "${BASE_REF}^{commit}" 2>/dev/null)" || {
   printf 'newtask: base ref is not a commit: %s\n' "$BASE_REF" >&2
-  printf 'If this is a new repository, create the initial commit first.\n' >&2
   exit 1
 }
 
-PRIMARY_ROOT="$(git worktree list --porcelain | awk '/^worktree / { sub(/^worktree /, ""); print; exit }')"
-REPO_NAME="$(basename -- "$PRIMARY_ROOT")"
-WORKTREE_ROOT="${AI_WORKTREE_ROOT:-$(dirname -- "$PRIMARY_ROOT")/${REPO_NAME}_worktrees}"
-WORKTREE_PATH="${WORKTREE_ROOT}/${TASK_NAME}"
-BRANCH_NAME="feature/${TASK_NAME}"
+branch_is_checked_out() {
+  local record
+  while IFS= read -r -d '' record; do
+    if [ "$record" = "branch refs/heads/$BRANCH_NAME" ]; then return 0; fi
+  done < <(git -C "$REPO_ROOT" worktree list --porcelain -z)
+  return 1
+}
 
-git check-ref-format --branch "$BRANCH_NAME" >/dev/null
-mkdir -p "$WORKTREE_ROOT"
-
-if git show-ref --verify --quiet "refs/heads/${BRANCH_NAME}"; then
-  git -C "$REPO_ROOT" worktree add "$WORKTREE_PATH" "$BRANCH_NAME"
-else
-  git -C "$REPO_ROOT" worktree add -b "$BRANCH_NAME" "$WORKTREE_PATH" "$BASE_REF"
+EXISTING_BRANCH=false
+if git show-ref --verify --quiet "refs/heads/$BRANCH_NAME"; then
+  EXISTING_BRANCH=true
+  if branch_is_checked_out; then
+    printf 'newtask: %s is already checked out; use task open %s\n' "$BRANCH_NAME" "$TASK_NAME" >&2
+    exit 1
+  fi
+  if $BASE_EXPLICIT; then
+    printf 'newtask: %s already exists; omit BASE_REF to reuse it, or choose another task name\n' "$BRANCH_NAME" >&2
+    exit 1
+  fi
 fi
 
-printf 'Created worktree\n'
-printf '  branch: %s\n' "$BRANCH_NAME"
-printf '  path:   %s\n' "$WORKTREE_PATH"
-printf '\nNext: dev %q\n' "$WORKTREE_PATH"
+if [ -n "${AI_WORKTREE_ROOT:-}" ]; then
+  case "$AI_WORKTREE_ROOT" in
+    /*) WORKTREE_ROOT="$AI_WORKTREE_ROOT" ;;
+    *) WORKTREE_ROOT="$(pwd -P)/$AI_WORKTREE_ROOT" ;;
+  esac
+  WORKTREE_ROOT="$WORKTREE_ROOT/$(ai_repo_id "$PRIMARY_ROOT")"
+else
+  WORKTREE_ROOT="$(dirname -- "$PRIMARY_ROOT")/$(basename -- "$PRIMARY_ROOT")_worktrees"
+fi
+mkdir -p -- "$WORKTREE_ROOT"
+WORKTREE_ROOT="$(ai_canonical_dir "$WORKTREE_ROOT")"
+WORKTREE_PATH="$WORKTREE_ROOT/$TASK_NAME"
+if [ -e "$WORKTREE_PATH" ] || [ -L "$WORKTREE_PATH" ]; then
+  printf 'newtask: target already exists: %s\n' "$WORKTREE_PATH" >&2
+  exit 1
+fi
+
+# Create the branch separately so rollback only touches a branch we own, and
+# compare its original commit before deleting it if checkout fails.
+CREATED_BRANCH=false
+rollback_branch() {
+  local result=$?
+  if $CREATED_BRANCH && ! branch_is_checked_out; then
+    git -C "$REPO_ROOT" update-ref -d "refs/heads/$BRANCH_NAME" "$BASE_COMMIT" || \
+      printf 'newtask: branch changed during setup; preserved %s\n' "$BRANCH_NAME" >&2
+  fi
+  return "$result"
+}
+trap rollback_branch EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+if ! $EXISTING_BRANCH; then
+  git -C "$REPO_ROOT" branch --no-track "$BRANCH_NAME" "$BASE_COMMIT"
+  CREATED_BRANCH=true
+fi
+git -C "$REPO_ROOT" worktree add "$WORKTREE_PATH" "$BRANCH_NAME" >&2
+CREATED_BRANCH=false
+if $PRINT_PATH; then
+  printf '%s\n' "$WORKTREE_PATH"
+else
+  printf 'Created worktree\n  branch: %s\n  path:   %s\n' "$BRANCH_NAME" "$WORKTREE_PATH"
+  printf '\nNext: task open %s\n' "$TASK_NAME"
+fi

@@ -1,22 +1,46 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
+SCRIPT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -f "$SCRIPT_ROOT/lib/common.sh" ]; then
+  source "$SCRIPT_ROOT/lib/common.sh"
+else
+  source "${AI_DEV_HOME:-$HOME}/.local/share/ai-dev-env/common.sh"
+fi
 
 usage() {
   cat <<'EOF'
-Usage: dev [project-directory] [--session NAME] [--no-codex]
+Usage: dev [DIRECTORY] [OPTIONS]
+  --layout classic|focus|pair|full
+                           Default classic: original six windows, 3 Codex + Claude
+  --profile standard|deep  Default deep: strongest visible catalog preset
+  --restore-layout         Restore an unchanged focus session to classic in place
+  --start                  Run commands from the project's .ai-dev.conf
+  --resume                 Open the AI history picker when creating a workspace
+  --no-ai                  Leave all AI panes at a shell
+  --no-codex / --no-claude  Disable one CLI
+  --unsafe                 Also bypass Claude permissions in the classic layout
+  --session NAME           Override the path-derived tmux session name
+  --detached               Create without attaching (also useful for automation)
+  --plan                   Print layout and commands without starting anything
+  --check                  Validate project config, executables and ports
+  -h, --help               Show help
 
-Create or attach to a project-scoped tmux workspace. The current directory is
-used when project-directory is omitted.
+Existing sessions are reused only when their recorded directory matches.
+Layout/start/resume options apply to new sessions. Use task pick to switch tasks.
+All Codex panes start with full access and no approval prompts by default.
+Project config is literal key=value data; it is never sourced as shell code.
 EOF
 }
-
-PROJECT_INPUT=""
-SESSION_NAME=""
-START_CODEX=1
-CODEX_MODEL="gpt-6-astra"
-CODEX_REASONING_EFFORT="ultra"
-CODEX_FAST_MODE=1
-CODEX_LAUNCH_COMMAND=""
+die() { printf 'dev: %s\n' "$*" >&2; exit 2; }
+warn() { printf 'WARN  %s\n' "$*" >&2; }
+PROJECT_INPUT="" SESSION_NAME="" LAYOUT="" PROFILE=""
+START_CODEX=1 START_CLAUDE=1 START_SERVICES=0 RESUME=0 UNSAFE=0 DETACHED=0 PLAN=0 CHECK=0
+RESTORE_LAYOUT=0 RESTORE_EXISTING=0
+CODEX_MODEL="" CODEX_REASONING_EFFORT="" CODEX_FAST_MODE=0 CODEX_LAUNCH_COMMAND=""
+CONFIG_MODEL="" CONFIG_EFFORT="" CONFIG_FAST="auto" CODEX_SESSION="" CLAUDE_SESSION=""
+BACKEND_DIR="" FRONTEND_DIR="" BACKEND_CMD="" FRONTEND_CMD="" TEST_CMD="" SERVICES_CMD=""
+BACKEND_PORT="" FRONTEND_PORT=""
+CONFIG_LAYOUT="classic" CONFIG_PROFILE="deep"
 
 resolve_strongest_codex_settings() {
   local catalog_file=""
@@ -37,27 +61,27 @@ resolve_strongest_codex_settings() {
   local supports_fast=0
 
   # The installer targets macOS, where plutil provides a dependency-free JSON
-  # parser. Keep the known strongest settings above as a safe fallback.
+  # parser. If discovery fails, retain the user's CLI defaults.
   if [ ! -x /usr/bin/plutil ]; then
-    printf 'dev: cannot inspect the Codex model catalog; using %s (%s)\n' \
+    printf 'dev: cannot inspect the Codex model catalog; using CLI defaults (%s %s)\n' \
       "$CODEX_MODEL" "$CODEX_REASONING_EFFORT" >&2
     return 0
   fi
   catalog_file="$(mktemp "${TMPDIR:-/tmp}/ai-dev-env-models.XXXXXX")" || {
-    printf 'dev: cannot create a temporary model catalog; using %s (%s)\n' \
+    printf 'dev: cannot create a temporary model catalog; using CLI defaults (%s %s)\n' \
       "$CODEX_MODEL" "$CODEX_REASONING_EFFORT" >&2
     return 0
   }
 
   # Prefer the account-aware catalog, then the catalog bundled with the CLI.
-  if ! codex debug models > "$catalog_file" 2>/dev/null || \
+  if ! ai_timeout 5 codex debug models > "$catalog_file" 2>/dev/null || \
      ! /usr/bin/plutil -extract models.0.slug raw \
        -o /dev/null "$catalog_file" >/dev/null 2>&1; then
-    if ! codex debug models --bundled > "$catalog_file" 2>/dev/null || \
+    if ! ai_timeout 3 codex debug models --bundled > "$catalog_file" 2>/dev/null || \
        ! /usr/bin/plutil -extract models.0.slug raw \
          -o /dev/null "$catalog_file" >/dev/null 2>&1; then
       rm -f -- "$catalog_file"
-      printf 'dev: cannot read the Codex model catalog; using %s (%s)\n' \
+      printf 'dev: cannot read the Codex model catalog; using CLI defaults (%s %s)\n' \
         "$CODEX_MODEL" "$CODEX_REASONING_EFFORT" >&2
       return 0
     fi
@@ -136,155 +160,404 @@ resolve_strongest_codex_settings() {
     CODEX_REASONING_EFFORT="$best_effort"
     CODEX_FAST_MODE="$supports_fast"
   else
-    printf 'dev: no eligible model found in the Codex catalog; using %s (%s)\n' \
+    printf 'dev: no eligible model found in the Codex catalog; using CLI defaults (%s %s)\n' \
       "$CODEX_MODEL" "$CODEX_REASONING_EFFORT" >&2
   fi
 }
 
-build_codex_launch_command() {
-  resolve_strongest_codex_settings
-  CODEX_LAUNCH_COMMAND="codex --model $CODEX_MODEL --config model_reasoning_effort=$CODEX_REASONING_EFFORT"
-  if [ "$CODEX_FAST_MODE" -eq 1 ]; then
-    CODEX_LAUNCH_COMMAND="$CODEX_LAUNCH_COMMAND --config service_tier=fast --enable fast_mode"
-  fi
-  CODEX_LAUNCH_COMMAND="$CODEX_LAUNCH_COMMAND --enable multi_agent --dangerously-bypass-approvals-and-sandbox"
-}
-
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --session)
-      [ "$#" -ge 2 ] || { printf 'dev: --session requires a name\n' >&2; exit 2; }
-      SESSION_NAME="$2"
-      shift 2
-      ;;
-    --no-codex)
-      START_CODEX=0
-      shift
-      ;;
-    -h|--help)
-      usage
-      exit 0
-      ;;
-    -*)
-      printf 'dev: unknown option: %s\n' "$1" >&2
-      usage >&2
-      exit 2
-      ;;
-    *)
-      [ -z "$PROJECT_INPUT" ] || {
-        printf 'dev: only one project directory is allowed\n' >&2
-        exit 2
-      }
-      PROJECT_INPUT="$1"
-      shift
-      ;;
+    --session|--layout|--profile)
+      [ "$#" -ge 2 ] || die "$1 requires a value"
+      case "$1" in
+        --session) SESSION_NAME="$2" ;;
+        --layout) LAYOUT="$2" ;;
+        --profile) PROFILE="$2" ;;
+      esac
+      shift 2 ;;
+    --no-codex) START_CODEX=0; shift ;;
+    --no-claude) START_CLAUDE=0; shift ;;
+    --no-ai) START_CODEX=0; START_CLAUDE=0; shift ;;
+    --start) START_SERVICES=1; shift ;;
+    --resume) RESUME=1; shift ;;
+    --restore-layout) RESTORE_LAYOUT=1; shift ;;
+    --unsafe) UNSAFE=1; shift ;;
+    --detached) DETACHED=1; shift ;;
+    --plan) PLAN=1; shift ;;
+    --check) CHECK=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    -*) die "unknown option: $1 (see dev --help)" ;;
+    *) [ -z "$PROJECT_INPUT" ] || die "only one directory is allowed"; PROJECT_INPUT="$1"; shift ;;
   esac
 done
 
-command -v tmux >/dev/null 2>&1 || {
-  printf 'dev: tmux is not installed\n' >&2
-  exit 1
-}
-
-PROJECT_INPUT="${PROJECT_INPUT:-.}"
-[ -d "$PROJECT_INPUT" ] || {
-  printf 'dev: directory not found: %s\n' "$PROJECT_INPUT" >&2
-  exit 1
-}
-PROJECT_DIR="$(cd -- "$PROJECT_INPUT" >/dev/null 2>&1 && pwd -P)"
-
-if [ -z "$SESSION_NAME" ]; then
-  PROJECT_SLUG="$(basename -- "$PROJECT_DIR" | tr '[:space:].' '--' | tr -cd '[:alnum:]_-')"
-  SESSION_NAME="ai-${PROJECT_SLUG:-dev}"
+PROJECT_DIR="$(ai_canonical_dir "${PROJECT_INPUT:-.}")" || die "directory not found: ${PROJECT_INPUT:-.}"
+# Calling from a backend subdirectory should return to the same worktree.
+if root="$(git -C "$PROJECT_DIR" rev-parse --show-toplevel 2>/dev/null)"; then
+  PROJECT_DIR="$(ai_canonical_dir "$root")"
 fi
 
-case "$SESSION_NAME" in
-  *[!A-Za-z0-9_-]*|'')
-    printf 'dev: session names may contain only letters, numbers, _ and -\n' >&2
-    exit 2
-    ;;
-esac
-
-attach_session() {
-  if [ -n "${TMUX:-}" ]; then
-    tmux switch-client -t "=${SESSION_NAME}"
-  else
-    exec tmux attach-session -t "=${SESSION_NAME}"
-  fi
+trim() {
+  local text="$1"
+  text="${text#"${text%%[![:space:]]*}"}"
+  text="${text%"${text##*[![:space:]]}"}"
+  printf '%s' "$text"
 }
 
-if tmux has-session -t "=${SESSION_NAME}" 2>/dev/null; then
+load_project_config() {
+  local file="$PROJECT_DIR/.ai-dev.conf" line key value seen="|" number=0
+  [ -f "$file" ] || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    number=$((number + 1))
+    line="$(trim "$line")"
+    case "$line" in ''|'#'*) continue ;; esac
+    case "$line" in *=*) ;; *) die "$file:$number: expected key=value" ;; esac
+    key="$(trim "${line%%=*}")"
+    value="$(trim "${line#*=}")"
+    case "$seen" in *"|$key|"*) die "$file:$number: duplicate key $key" ;; esac
+    seen="$seen$key|"
+    case "$key" in
+      layout) CONFIG_LAYOUT="$value" ;;
+      profile) CONFIG_PROFILE="$value" ;;
+      backend_dir) BACKEND_DIR="$value" ;;
+      frontend_dir) FRONTEND_DIR="$value" ;;
+      backend_cmd) BACKEND_CMD="$value" ;;
+      frontend_cmd) FRONTEND_CMD="$value" ;;
+      test_cmd) TEST_CMD="$value" ;;
+      services_cmd) SERVICES_CMD="$value" ;;
+      backend_port) BACKEND_PORT="$value" ;;
+      frontend_port) FRONTEND_PORT="$value" ;;
+      codex_model) CONFIG_MODEL="$value" ;;
+      codex_effort) CONFIG_EFFORT="$value" ;;
+      codex_fast) CONFIG_FAST="$value" ;;
+      codex_session) CODEX_SESSION="$value" ;;
+      claude_session) CLAUDE_SESSION="$value" ;;
+      *) die "$file:$number: unknown key $key" ;;
+    esac
+  done < "$file"
+}
+load_project_config
+LAYOUT="${LAYOUT:-$CONFIG_LAYOUT}"
+[ "$RESTORE_LAYOUT" -eq 0 ] || LAYOUT=classic
+PROFILE="${PROFILE:-$CONFIG_PROFILE}"
+case "$LAYOUT" in classic|focus|pair|full) ;; *) die "layout must be classic, focus, pair or full" ;; esac
+case "$PROFILE" in standard|deep) ;; *) die "profile must be standard or deep" ;; esac
+case "$CONFIG_FAST" in auto|0|1) ;; *) die "codex_fast must be auto, 0 or 1" ;; esac
+case "$CONFIG_EFFORT" in ''|none|minimal|low|medium|high|xhigh|max|ultra) ;; *) die "unsupported codex_effort value" ;; esac
+case "$CONFIG_MODEL" in *[!A-Za-z0-9._-]*) die "invalid codex_model" ;; esac
+for task_session_id in "$CODEX_SESSION" "$CLAUDE_SESSION"; do
+  case "$task_session_id" in *[!A-Za-z0-9_-]*) die "AI session IDs must contain only letters, digits, _ and -" ;; esac
+done
+
+resolve_project_dir() {
+  local configured="$1" candidate resolved
+  shift
+  if [ -n "$configured" ]; then
+    case "$configured" in /*) candidate="$configured" ;; *) candidate="$PROJECT_DIR/$configured" ;; esac
+  else
+    candidate="$PROJECT_DIR"
+    for resolved in "$@"; do
+      if [ -d "$PROJECT_DIR/$resolved" ]; then candidate="$PROJECT_DIR/$resolved"; break; fi
+    done
+  fi
+  resolved="$(ai_canonical_dir "$candidate")" || die "configured directory not found: $candidate"
+  case "$resolved" in "$PROJECT_DIR"|"$PROJECT_DIR"/*) ;; *) die "configured directory must stay inside this worktree: $candidate" ;; esac
+  printf '%s\n' "$resolved"
+}
+BACKEND_DIR="$(resolve_project_dir "$BACKEND_DIR" backend api server)"
+FRONTEND_DIR="$(resolve_project_dir "$FRONTEND_DIR" frontend web ui)"
+SESSION_NAME="${SESSION_NAME:-$(ai_session_name "$PROJECT_DIR")}"
+case "$SESSION_NAME" in *[!A-Za-z0-9_-]*|'') die "session names allow letters, digits, _ and -" ;; esac
+PROJECT_SLUG="$(ai_slug "${PROJECT_DIR##*/}")"
+PROJECT_LABEL="${PROJECT_DIR##*/}"
+PRIMARY_ROOT="$(ai_repo_primary "$PROJECT_DIR" || true)"
+if [ -n "$PRIMARY_ROOT" ] && [ "$PRIMARY_ROOT" != "$PROJECT_DIR" ]; then
+  PROJECT_LABEL="${PRIMARY_ROOT##*/} / $PROJECT_LABEL"
+fi
+# Keep human names (including Chinese), while removing terminal control bytes.
+PROJECT_LABEL="$(printf '%s' "$PROJECT_LABEL" | LC_ALL=C tr '\001-\037\177' '?')"
+PROJECT_HASH="$(ai_hash "$PROJECT_DIR")"
+COMPOSE_PROJECT_NAME="ai-$(printf '%s' "$PROJECT_SLUG" | tr '[:upper:]' '[:lower:]')-$PROJECT_HASH"
+seed=$((16#$PROJECT_HASH))
+BACKEND_PORT="${BACKEND_PORT:-$((20000 + seed % 10000))}"
+FRONTEND_PORT="${FRONTEND_PORT:-$((30000 + seed % 10000))}"
+for port in "$BACKEND_PORT" "$FRONTEND_PORT"; do
+  case "$port" in ''|*[!0-9]*) die "ports must be integers" ;; esac
+  [ "${#port}" -le 5 ] || die "port out of range: $port"
+  [ "$port" -ge 1024 ] && [ "$port" -le 65535 ] || die "port must be between 1024 and 65535: $port"
+done
+# Normalize leading zeros so applications never interpret ports as octal.
+BACKEND_PORT=$((10#$BACKEND_PORT))
+FRONTEND_PORT=$((10#$FRONTEND_PORT))
+[ "$BACKEND_PORT" != "$FRONTEND_PORT" ] || die "backend_port and frontend_port must differ"
+
+check_commands() {
+  local label command_text executable workdir failures=0
+  for label in BACKEND FRONTEND TEST SERVICES; do
+    case "$label" in
+      BACKEND) command_text="$BACKEND_CMD"; workdir="$BACKEND_DIR" ;;
+      FRONTEND) command_text="$FRONTEND_CMD"; workdir="$FRONTEND_DIR" ;;
+      TEST) command_text="$TEST_CMD"; workdir="$PROJECT_DIR" ;;
+      SERVICES) command_text="$SERVICES_CMD"; workdir="$PROJECT_DIR" ;;
+    esac
+    [ -n "$command_text" ] || continue
+    if ! bash -n -c "$command_text"; then warn "$label command has invalid shell syntax"; failures=1; continue; fi
+    executable="${command_text%%[[:space:]]*}"
+    # Only diagnose simple leading program names; shell syntax is not evaluated.
+    case "$executable" in
+      ''|*[!A-Za-z0-9_./-]*) ;;
+      *) if ! (cd -- "$workdir" && command -v "$executable" >/dev/null 2>&1); then
+           warn "$label executable is unavailable: $executable"; failures=1
+         fi ;;
+    esac
+  done
+  return "$failures"
+}
+check_ports() {
+  command -v lsof >/dev/null 2>&1 || { warn "lsof unavailable; ports not checked"; return 0; }
+  local port failures=0
+  for port in "$BACKEND_PORT" "$FRONTEND_PORT"; do
+    if lsof -nP -iTCP:"$port" -sTCP:LISTEN -t >/dev/null 2>&1; then
+      warn "port $port is in use; set backend_port/frontend_port in .ai-dev.conf"; failures=1
+    fi
+  done
+  return "$failures"
+}
+
+if [ "$CHECK" -eq 1 ]; then
+  failures=0
+  check_commands || failures=1
+  check_ports || failures=1
+  for cli in tmux git; do command -v "$cli" >/dev/null 2>&1 || { warn "$cli is missing"; failures=1; }; done
+  for cli in codex claude; do command -v "$cli" >/dev/null 2>&1 || warn "$cli is missing; its pane will stay at a shell"; done
+  if [ "$failures" -eq 0 ]; then printf 'PASS  Project configuration: %s\n' "$PROJECT_DIR"; fi
+  exit "$failures"
+fi
+
+if [ "$PLAN" -eq 1 ]; then
+  printf 'Project: %s\nSession: %s\nLayout: %s\nProfile: %s\n' "$PROJECT_DIR" "$SESSION_NAME" "$LAYOUT" "$PROFILE"
+  printf 'Ports: backend=%s frontend=%s\nCompose: %s\n' "$BACKEND_PORT" "$FRONTEND_PORT" "$COMPOSE_PROJECT_NAME"
+  printf 'AI: codex=%s claude=%s resume=%s unsafe=%s\n' "$START_CODEX" "$START_CLAUDE" "$RESUME" "$UNSAFE"
+  printf 'Codex permissions: full access, no approval prompts (all Codex panes).\n'
+  printf 'Commands: %s (enable with --start)\n' "$START_SERVICES"
+  printf '  backend [%s]: %s\n  frontend [%s]: %s\n  test: %s\n  services: %s\n' "$BACKEND_DIR" "$BACKEND_CMD" "$FRONTEND_DIR" "$FRONTEND_CMD" "$TEST_CMD" "$SERVICES_CMD"
+  if [ "$PROFILE" = deep ]; then printf 'Deep: catalog selection runs only at launch; failed queries retain CLI defaults.\n'; fi
+  exit 0
+fi
+
+command -v tmux >/dev/null 2>&1 || die "tmux is not installed"
+attach_session() {
+  if [ "$DETACHED" -eq 1 ]; then printf 'Ready: %s\n' "$SESSION_NAME"
+  elif [ -n "${TMUX:-}" ]; then tmux switch-client -t "=$SESSION_NAME"
+  else tmux attach-session -t "=$SESSION_NAME"; fi
+}
+if tmux has-session -t "=$SESSION_NAME" 2>/dev/null; then
+  recorded="$(tmux show-options -qv -t "=$SESSION_NAME:" @ai_project)"
+  [ "$recorded" = "$PROJECT_DIR" ] || die "session $SESSION_NAME belongs to another or unverified directory; choose --session NAME"
+  [ "$(tmux show-options -qv -t "=$SESSION_NAME:" @ai_ready)" = 1 ] || die "session $SESSION_NAME is incomplete; inspect it before retrying"
+  existing_layout="$(tmux show-options -qv -t "=$SESSION_NAME:" @ai_layout)"
+  if [ "$RESTORE_LAYOUT" -eq 1 ] && [ "$existing_layout" != classic ]; then
+    [ "$existing_layout" = focus ] || die "--restore-layout supports unchanged focus sessions; existing layout is $existing_layout"
+    RESTORE_EXISTING=1
+  else
+    if [ "$START_SERVICES" -eq 1 ] || [ "$RESUME" -eq 1 ]; then
+      warn "reattaching existing session; --start/--resume do not restart running panes"
+    fi
+    attach_session
+    exit 0
+  fi
+fi
+
+if [ "$START_SERVICES" -eq 1 ]; then check_commands; check_ports; fi
+if [ "$START_CODEX" -eq 1 ] && command -v codex >/dev/null 2>&1; then
+  if [ "$PROFILE" = deep ] && [ -z "$CONFIG_MODEL" ]; then resolve_strongest_codex_settings; fi
+  CODEX_MODEL="${CONFIG_MODEL:-$CODEX_MODEL}"
+  CODEX_REASONING_EFFORT="${CONFIG_EFFORT:-$CODEX_REASONING_EFFORT}"
+  [ "$CONFIG_FAST" = auto ] || CODEX_FAST_MODE="$CONFIG_FAST"
+  codex_options=(--dangerously-bypass-approvals-and-sandbox)
+  [ -z "$CODEX_MODEL" ] || codex_options+=(--model "$CODEX_MODEL")
+  [ -z "$CODEX_REASONING_EFFORT" ] || codex_options+=(--config "model_reasoning_effort=$CODEX_REASONING_EFFORT")
+  if [ "$CODEX_FAST_MODE" -eq 1 ]; then codex_options+=(--config service_tier=fast --enable fast_mode); fi
+  if [ "$PROFILE" = deep ]; then codex_options+=(--enable multi_agent); fi
+  printf -v CODEX_FRESH_COMMAND '%q ' codex ${codex_options[@]+"${codex_options[@]}"}
+  codex_args=(codex)
+  if [ "$RESUME" -eq 1 ]; then
+    codex_args+=(resume)
+    [ -z "$CODEX_SESSION" ] || codex_args+=("$CODEX_SESSION")
+  fi
+  codex_args+=(${codex_options[@]+"${codex_options[@]}"})
+  printf -v CODEX_LAUNCH_COMMAND '%q ' "${codex_args[@]}"
+fi
+
+set_role() {
+  tmux select-pane -t "$1" -T "$2"
+  tmux set-option -p -t "$1" @ai_role "$2"
+}
+send_command() {
+  [ -n "$2" ] || return 0
+  local wrapped
+  printf -v wrapped 'bash -c %q' "$2"
+  tmux send-keys -l -t "$1" "$wrapped"
+  tmux send-keys -t "$1" Enter
+}
+new_window() { tmux new-window -d -P -F '#{pane_id}' -t "=$SESSION_NAME:" -n "$1" -c "$2"; }
+launch_claude() {
+  [ "$START_CLAUDE" -eq 1 ] && command -v claude >/dev/null 2>&1 || return 0
+  local claude_command
+  local claude_args=(claude)
+  if [ "$LAYOUT" != classic ]; then
+    claude_args+=(--permission-mode plan)
+  elif [ "$UNSAFE" -eq 1 ]; then
+    claude_args+=(--dangerously-skip-permissions)
+  fi
+  if [ "$RESUME" -eq 1 ]; then
+    claude_args+=(--resume)
+    [ -z "$CLAUDE_SESSION" ] || claude_args+=("$CLAUDE_SESSION")
+  fi
+  printf -v claude_command '%q ' "${claude_args[@]}"
+  send_command "$1" "$claude_command"
+}
+
+restore_classic_layout() {
+  local expected actual original_profile ai_window app_window primary_pane
+  local mixed_created="" mixed_pane="" mixed_window="" mixed_right="" added_codex=""
+  local renamed_ai=0 renamed_app=0 structure_ready=0
+  expected=$'ai:1\napp:2\nservices:1\ntest:1\ngit:1'
+  actual="$(tmux list-windows -t "=$SESSION_NAME" -F '#{window_name}:#{window_panes}')"
+  [ "$actual" = "$expected" ] || die "focus session was customized; --restore-layout left it unchanged"
+  if tmux list-windows -t "=$SESSION_NAME" -F '#{window_linked}' | grep -Fx 1 >/dev/null; then
+    die "focus session has windows linked to other sessions; left unchanged"
+  fi
+  original_profile="$(tmux show-options -qv -t "=$SESSION_NAME:" @ai_profile)"
+  ai_window="$(tmux display-message -p -t "=$SESSION_NAME:ai" '#{window_id}')"
+  app_window="$(tmux display-message -p -t "=$SESSION_NAME:app" '#{window_id}')"
+  primary_pane="$(tmux display-message -p -t "$ai_window" '#{pane_id}')"
+
+  # No new command runs until all layout operations succeed. Roll back only
+  # newly created shell panes; existing panes and their processes stay alive.
+  cleanup_restore() {
+    local result=$?
+    trap - ERR INT TERM
+    if [ "$structure_ready" -eq 0 ]; then
+      [ -z "$added_codex" ] || tmux kill-pane -t "$added_codex" >/dev/null 2>&1 || true
+      [ -z "$mixed_window" ] || tmux kill-window -t "$mixed_window" >/dev/null 2>&1 || true
+      [ "$renamed_ai" -eq 0 ] || tmux rename-window -t "$ai_window" ai || true
+      [ "$renamed_app" -eq 0 ] || tmux rename-window -t "$app_window" app || true
+      tmux move-window -r -t "=$SESSION_NAME:" >/dev/null 2>&1 || true
+      tmux set-option -t "=$SESSION_NAME:" @ai_layout focus || true
+      tmux set-option -t "=$SESSION_NAME:" @ai_profile "$original_profile" || true
+    fi
+    return "$result"
+  }
+  # RETURN does not catch errexit; ERR executes while function locals exist.
+  trap cleanup_restore ERR
+  trap 'cleanup_restore; exit 130' INT
+  trap 'cleanup_restore; exit 143' TERM
+  mixed_created="$(tmux new-window -d -a -P -F '#{window_id}:#{pane_id}' -t "$ai_window" -n codex-claude -c "$PROJECT_DIR")"
+  mixed_window="${mixed_created%%:*}"
+  mixed_pane="${mixed_created#*:}"
+  mixed_right="$(tmux split-window -d -h -P -F '#{pane_id}' -t "$mixed_pane" -c "$PROJECT_DIR")"
+  added_codex="$(tmux split-window -d -h -P -F '#{pane_id}' -t "$primary_pane" -c "$PROJECT_DIR")"
+  tmux rename-window -t "$ai_window" codex
+  renamed_ai=1
+  tmux rename-window -t "$app_window" backend-frontend
+  renamed_app=1
+  set_role "$added_codex" 'Codex 2'
+  set_role "$mixed_pane" 'Codex 3'
+  set_role "$mixed_right" Claude
+  tmux set-option -t "=$SESSION_NAME:" @ai_layout classic
+  tmux set-option -t "=$SESSION_NAME:" @ai_profile "$PROFILE"
+  structure_ready=1
+  trap - ERR INT TERM
+  send_command "$added_codex" "${CODEX_FRESH_COMMAND:-}"
+  send_command "$mixed_pane" "${CODEX_FRESH_COMMAND:-}"
+  launch_claude "$mixed_right"
+  printf 'Restored classic layout: %s (existing processes and their settings retained)\n' "$SESSION_NAME"
+}
+
+if [ "$RESTORE_EXISTING" -eq 1 ]; then
+  restore_classic_layout
   attach_session
   exit 0
 fi
 
-BACKEND_DIR="$PROJECT_DIR"
-for candidate in backend api server; do
-  if [ -d "$PROJECT_DIR/$candidate" ]; then
-    BACKEND_DIR="$PROJECT_DIR/$candidate"
-    break
+AI_WINDOW=ai
+APP_WINDOW=app
+if [ "$LAYOUT" = classic ]; then AI_WINDOW=codex; APP_WINDOW=backend-frontend; fi
+
+# Failures during creation remove only the session created by this invocation.
+CREATED=0
+cleanup_partial() {
+  local result=$?
+  if [ "$CREATED" -eq 1 ] && [ "$result" -ne 0 ]; then
+    tmux kill-session -t "=$SESSION_NAME" >/dev/null 2>&1 || true
+    warn "workspace creation failed; incomplete session removed"
   fi
-done
+}
+trap cleanup_partial EXIT
+tmux new-session -d -s "$SESSION_NAME" -n "$AI_WINDOW" -c "$PROJECT_DIR" \
+  -e "BACKEND_PORT=$BACKEND_PORT" -e "FRONTEND_PORT=$FRONTEND_PORT" \
+  -e "COMPOSE_PROJECT_NAME=$COMPOSE_PROJECT_NAME"
+CREATED=1
+tmux set-option -t "=$SESSION_NAME:" @ai_project "$PROJECT_DIR"
+tmux set-option -t "=$SESSION_NAME:" @ai_label "$PROJECT_LABEL"
+tmux set-option -t "=$SESSION_NAME:" @ai_profile "$PROFILE"
+tmux set-option -t "=$SESSION_NAME:" @ai_layout "$LAYOUT"
+primary_pane="$(tmux display-message -p -t "=$SESSION_NAME:$AI_WINDOW" '#{pane_id}')"
+set_role "$primary_pane" 'Implement'
 
-FRONTEND_DIR="$PROJECT_DIR"
-for candidate in frontend web ui; do
-  if [ -d "$PROJECT_DIR/$candidate" ]; then
-    FRONTEND_DIR="$PROJECT_DIR/$candidate"
-    break
+review_pane=""
+classic_codex_right="" classic_mixed_left=""
+if [ "$LAYOUT" = classic ]; then
+  set_role "$primary_pane" 'Codex 1'
+  classic_codex_right="$(tmux split-window -d -h -P -F '#{pane_id}' -t "$primary_pane" -c "$PROJECT_DIR")"
+  classic_mixed_left="$(new_window codex-claude "$PROJECT_DIR")"
+  review_pane="$(tmux split-window -d -h -P -F '#{pane_id}' -t "$classic_mixed_left" -c "$PROJECT_DIR")"
+  set_role "$classic_codex_right" 'Codex 2'
+  set_role "$classic_mixed_left" 'Codex 3'
+  set_role "$review_pane" Claude
+fi
+if [ "$LAYOUT" = pair ] || [ "$LAYOUT" = full ]; then
+  review_pane="$(tmux split-window -h -P -F '#{pane_id}' -t "$primary_pane" -c "$PROJECT_DIR")"
+  set_role "$review_pane" 'Review (plan mode)'
+fi
+if [ "$LAYOUT" = full ]; then
+  extra_pane="$(new_window explore "$PROJECT_DIR")"
+  set_role "$extra_pane" 'Explore (Codex)'
+  if [ -n "$CODEX_LAUNCH_COMMAND" ]; then
+    # Share the selected model and permissions, but use a separate conversation.
+    send_command "$extra_pane" "$CODEX_FRESH_COMMAND"
   fi
-done
-
-if [ "$START_CODEX" -eq 1 ] && command -v codex >/dev/null 2>&1; then
-  build_codex_launch_command
 fi
-
-tmux new-session -d -s "$SESSION_NAME" -n codex -c "$PROJECT_DIR"
-CODEX_LEFT_PANE="$(tmux display-message -p -t "=${SESSION_NAME}:codex" '#{pane_id}')"
-CODEX_RIGHT_PANE="$(
-  tmux split-window -h -P -F '#{pane_id}' -t "$CODEX_LEFT_PANE" -c "$PROJECT_DIR"
-)"
-
-MIXED_LEFT_PANE="$(
-  tmux new-window -d -P -F '#{pane_id}' -t "=${SESSION_NAME}" \
-    -n codex-claude -c "$PROJECT_DIR"
-)"
-MIXED_RIGHT_PANE="$(
-  tmux split-window -h -P -F '#{pane_id}' -t "$MIXED_LEFT_PANE" -c "$PROJECT_DIR"
-)"
-
-BACKEND_LEFT_PANE="$(
-  tmux new-window -d -P -F '#{pane_id}' -t "=${SESSION_NAME}" \
-    -n backend-frontend -c "$BACKEND_DIR"
-)"
-tmux split-window -h -t "$BACKEND_LEFT_PANE" -c "$FRONTEND_DIR"
-
-tmux new-window -d -t "=${SESSION_NAME}" -n services -c "$PROJECT_DIR"
-tmux new-window -d -t "=${SESSION_NAME}" -n test -c "$PROJECT_DIR"
-tmux new-window -d -t "=${SESSION_NAME}" -n git -c "$PROJECT_DIR"
-
-if [ -n "$CODEX_LAUNCH_COMMAND" ]; then
-  for pane_id in "$CODEX_LEFT_PANE" "$CODEX_RIGHT_PANE" "$MIXED_LEFT_PANE"; do
-    tmux send-keys -t "$pane_id" "$CODEX_LAUNCH_COMMAND" C-m
-  done
+app_pane="$(new_window "$APP_WINDOW" "$BACKEND_DIR")"
+set_role "$app_pane" "Backend :$BACKEND_PORT"
+front_pane="$(tmux split-window -h -P -F '#{pane_id}' -t "$app_pane" -c "$FRONTEND_DIR")"
+set_role "$front_pane" "Frontend :$FRONTEND_PORT"
+services_pane="$(new_window services "$PROJECT_DIR")"
+test_pane="$(new_window test "$PROJECT_DIR")"
+git_pane="$(new_window git "$PROJECT_DIR")"
+set_role "$services_pane" Services
+set_role "$test_pane" Tests
+set_role "$git_pane" Git
+send_command "$primary_pane" "$CODEX_LAUNCH_COMMAND"
+if [ "$LAYOUT" = classic ]; then
+  send_command "$classic_codex_right" "${CODEX_FRESH_COMMAND:-}"
+  send_command "$classic_mixed_left" "${CODEX_FRESH_COMMAND:-}"
 fi
-
-if command -v claude >/dev/null 2>&1; then
-  tmux send-keys -t "$MIXED_RIGHT_PANE" \
-    'claude --dangerously-skip-permissions' C-m
-fi
-
+[ -z "$review_pane" ] || launch_claude "$review_pane"
 if git -C "$PROJECT_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-  if command -v lazygit >/dev/null 2>&1; then
-    tmux send-keys -t "=${SESSION_NAME}:git" lazygit C-m
-  else
-    tmux send-keys -t "=${SESSION_NAME}:git" 'git status --short --branch' C-m
-  fi
+  if command -v lazygit >/dev/null 2>&1; then send_command "$git_pane" lazygit
+  else send_command "$git_pane" 'git status --short --branch'; fi
 fi
-
-if [ -f "$PROJECT_DIR/compose.yml" ] || [ -f "$PROJECT_DIR/compose.yaml" ] || \
-   [ -f "$PROJECT_DIR/docker-compose.yml" ] || [ -f "$PROJECT_DIR/docker-compose.yaml" ]; then
-  tmux send-keys -t "=${SESSION_NAME}:services" 'docker compose ps' C-m
+if [ "$START_SERVICES" -eq 1 ]; then
+  send_command "$app_pane" "$BACKEND_CMD"
+  send_command "$front_pane" "$FRONTEND_CMD"
+  send_command "$services_pane" "$SERVICES_CMD"
+  send_command "$test_pane" "$TEST_CMD"
 fi
-
-tmux select-window -t "=${SESSION_NAME}:codex"
+tmux select-pane -t "$primary_pane"
+tmux select-window -t "=$SESSION_NAME:$AI_WINDOW"
+tmux set-option -t "=$SESSION_NAME:" @ai_ready 1
+CREATED=0
+trap - EXIT
 attach_session
